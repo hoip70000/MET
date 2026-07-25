@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { IconButton } from '../ui';
 import { cn } from '../ui/cn';
 import { ToolFlyout } from './ToolFlyout';
@@ -27,6 +27,12 @@ export function ToolGroupButton({ group, activeTool, onToolChange, orientation }
     setRemembered(id);
     onToolChange(id);
   }
+
+  // Picking a tool outside this group (keyboard shortcut, or another group's own icon/flyout)
+  // must close this flyout too — it's otherwise local state with nothing else telling it to.
+  useEffect(() => {
+    if (!group.tools.some(t => t.id === activeTool)) setFlyoutOpen(false);
+  }, [activeTool, group.tools]);
 
   function startHold() {
     if (!hasSiblings) return;
