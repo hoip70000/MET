@@ -132,3 +132,41 @@ test('a painted raster layer persists its pixels', async ({ page }) => {
   await expect.poll(async () => (await readStudioStore(page))?.layersJson ?? '', { timeout: 15_000 })
     .toContain('"raster":"data:image/png');
 });
+
+/** Total layer count across the whole tree, groups' children included. */
+function countAllLayers(layersByPage: Record<string, { children?: unknown[] }[]>): number {
+  function walk(list: { children?: unknown[] }[]): number {
+    return list.reduce((sum: number, l) => sum + 1 + (Array.isArray(l.children) ? walk(l.children as { children?: unknown[] }[]) : 0), 0);
+  }
+  return Object.values(layersByPage).reduce((sum, list) => sum + walk(list), 0);
+}
+
+test('picking a paint tool while Background is active reuses a raster layer nested in a group, not a new one', async ({ page }) => {
+  await page.getByRole('button', { name: 'Add layer' }).click();
+  await expect(page.getByText('Layer 1', { exact: true })).toBeVisible();
+  await layerRow(page, 'Layer 1').click();
+  await page.getByRole('button', { name: 'Group layers' }).click();
+  await expect(page.getByText('Group', { exact: true })).toBeVisible();
+  await expect(page.getByText('Layer 1', { exact: true })).toBeVisible();
+
+  // Background(1) + Group(1) + Layer 1(1, nested) = 3.
+  await expect.poll(async () => {
+    const store = await readStudioStore(page);
+    return store ? countAllLayers(JSON.parse(store.layersJson)) : -1;
+  }, { timeout: 10_000 }).toBe(3);
+
+  // Select the Background layer, then pick the Brush tool — the auto-switch effect must find the
+  // clean-patch layer nested inside the group and reuse it, not create a redundant top-level one
+  // (it used to only scan the root array, missing anything inside a group).
+  await layerRow(page, 'Background').click();
+  await page.keyboard.press('b');
+  // Long enough to clear both the effect (synchronous) and the 1.2s autosave debounce with margin —
+  // a shorter wait here would just read a stale pre-keypress snapshot in both the buggy and fixed
+  // cases, silently proving nothing either way.
+  await page.waitForTimeout(1800);
+
+  const store = await readStudioStore(page);
+  expect(countAllLayers(JSON.parse(store!.layersJson))).toBe(3);
+  await expect(page.getByText('Layer 2', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('Layer 3', { exact: true })).toHaveCount(0);
+});
