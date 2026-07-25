@@ -1143,7 +1143,10 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     if (quickMaskActive || activeMaskLayerId) return;
     if (!(PAINT_TOOLS as readonly string[]).includes(activeTool) || !activeLayer) return;
     if (activeLayer.type === 'clean-patch') return;
-    const existing = [...layers].reverse().find(l => l.type === 'clean-patch');
+    // flattenTree, not the raw root array — a clean-patch layer nested inside a group is otherwise
+    // invisible to this scan, so painting while a group holding one is active/collapsed would
+    // create a redundant new layer instead of reusing the one that already exists.
+    const existing = [...flattenTree(layers)].reverse().find(l => l.type === 'clean-patch');
     if (existing) {
       setActiveLayerId(existing.id);
     } else {
