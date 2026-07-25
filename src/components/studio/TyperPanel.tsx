@@ -1,5 +1,5 @@
-import { useMemo, useRef, useState } from 'react';
-import { Target, RotateCcw, Plus, Trash2, Copy, Download, Upload, Layers as LayersIcon, Pencil, Check, FolderPlus, Wand2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Target, RotateCcw, Plus, Trash2, Copy, Download, Upload, Layers as LayersIcon, Pencil, Check, FolderPlus, Wand2, Play } from 'lucide-react';
 import { Textarea, IconButton } from '../ui';
 import { cn } from '../ui/cn';
 import { swal, swalToast } from '../../lib/swalTheme';
@@ -63,6 +63,10 @@ export function TyperPanel({
   const lines = useMemo(() => parseTyperScript(script, styles, { folders, ignoreLinePrefixes, ignoreTags, defaultStyleId }), [script, styles, folders, ignoreLinePrefixes, ignoreTags, defaultStyleId]);
   const current = lines[index] ?? null;
   const done = lines.length > 0 && index >= lines.length;
+  const currentRowRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    currentRowRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [index]);
 
   const folderTree = useMemo(() => buildFolderTree(folders), [folders]);
   const folderOptions = useMemo(() => flattenFolderTree(folderTree), [folderTree]);
@@ -341,11 +345,32 @@ export function TyperPanel({
           </div>
         </div>
 
-        {current && (
-          <div className="rounded-control border border-hairline bg-ink/5 px-2.5 py-2 text-ui text-ink truncate">
-            {current.content}
-          </div>
-        )}
+        {/* Every parsed line, numbered and individually clickable — clicking one jumps straight to
+            it (a direct trSetCur-style index set, not an advance) without visiting the lines in
+            between. Ctrl+Enter-style sequential advance (placing a bubble on canvas) stays the
+            existing +1 path in Studio.tsx's handleAddTextLayer/handlePlaceAllBubbles, untouched. */}
+        <div className="flex flex-col gap-0.5 max-h-48 overflow-y-auto rounded-control border border-hairline bg-ink/5 p-1">
+          {lines.length === 0 && (
+            <div className="text-micro text-ink-faint italic px-2 py-3 text-center">No lines yet — paste a script above.</div>
+          )}
+          {lines.map((line, i) => (
+            <button
+              key={i}
+              ref={i === index ? currentRowRef : undefined}
+              type="button"
+              onClick={() => onIndexChange(i)}
+              className={cn(
+                'flex items-center gap-2 px-2 py-1.5 rounded text-left text-micro transition-colors',
+                i === index ? 'bg-accent-soft text-accent' : 'text-ink hover:bg-ink/10'
+              )}
+            >
+              <span className="w-5 shrink-0 text-right font-mono tabular-nums opacity-70">{i + 1}</span>
+              <Play size={10} className="shrink-0 opacity-60" />
+              <span className="flex-1 truncate">{line.content}</span>
+              {line.pageHint && <span className="shrink-0 px-1 py-0.5 rounded bg-ink/10 text-[10px]">P{line.pageHint}</span>}
+            </button>
+          ))}
+        </div>
         {done && <div className="text-micro text-ink-faint italic">All lines placed.</div>}
 
         <div className="flex items-center gap-1.5">
