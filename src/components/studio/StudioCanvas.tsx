@@ -88,6 +88,10 @@ interface StudioCanvasProps {
   /** Built-ins + any installed custom fonts, for the floating text toolbar's font picker. */
   fontFamilies?: string[];
   onUpdateTextLayer: (id: string, patch: Partial<TextLayerData>) => void;
+  /** Double-clicking a text layer's own ⊞ overflow indicator — auto-fits fixedHeight to content,
+   *  undoably. Separate from onUpdateTextLayer: that path is deliberately unlabeled/continuous-
+   *  drag-safe everywhere else it's called, and this needs a real history entry. */
+  onAutoFitTextHeight: (id: string) => void;
   onUpdatePathLayer: (id: string, patch: Partial<PathLayerData>) => void;
   /** Commits the Pen/Curvature Pen tool's in-progress anchors as a new persisted path layer. */
   onAddPathLayer: (anchors: PathAnchor[], closed: boolean) => void;
@@ -207,7 +211,7 @@ export interface StudioCanvasHandle {
 
 export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(function StudioCanvas({
   page, showCleaned, overlayOpacity, showGrid = false, showRulers = false, activeTool, fitSignal, layers,
-  activeLayerId, selectedLayerIds, onSelectLayer, onSelectLayers, onAddTextLayer, onUpdateTextLayer, onUpdatePathLayer, onAddPathLayer, onTextSelectionChange,
+  activeLayerId, selectedLayerIds, onSelectLayer, onSelectLayers, onAddTextLayer, onUpdateTextLayer, onAutoFitTextHeight, onUpdatePathLayer, onAddPathLayer, onTextSelectionChange,
   onTextLineSelectionChange, fontFamilies = [],
   paintSettings, selection, onSelectionChange, typeRegionArmed = false, onCreateTypeRegion, onPaintStrokeEnd, onEyedropperPick, onCommitCrop,
   queuedBubbleRects, queuedSliceRects, transformingSelection = false, onExitTransformSelection, quickMaskActive = false,
@@ -268,6 +272,10 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
   /** Hovering a text layer's own box body (not one of the Transformer's handles, which sit on top
    *  and win the hit-test first) — drives the move-cursor over the container below. */
   const [hoveringTextBody, setHoveringTextBody] = useState(false);
+  /** Hovering a text layer's own ⊞ overflow indicator specifically — takes priority over
+   *  hoveringTextBody for cursor purposes since the indicator sits at/on the box's bottom edge,
+   *  inside the body's own hit area. */
+  const [hoveringOverflowIndicator, setHoveringOverflowIndicator] = useState(false);
   const lassoPointsRef = useRef<{ x: number; y: number }[] | null>(null);
   /** Selection to combine against and how, captured from Shift/Alt at the start of a marquee/lasso drag. */
   const combineBaseRef = useRef<Selection>(NO_SELECTION);
@@ -1779,7 +1787,14 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
   // and win the hit-test first, so hoveringTextBody never fires for those) — only meaningful with
   // the Select tool actually able to drag it right now.
   const showMoveCursor = !panning && activeTool === 'select' && hoveringTextBody;
-  const cursorClass = panning ? 'cursor-grab' : showBrushCursor ? 'cursor-none' : showMoveCursor ? 'cursor-move' : '';
+  // Not gated on activeTool: the ⊞ indicator's click/dblclick handlers aren't tool-gated either
+  // (it's visible/interactive regardless of selection or active tool), so the cursor matches.
+  const showOverflowCursor = !panning && hoveringOverflowIndicator;
+  const cursorClass = panning ? 'cursor-grab'
+    : showBrushCursor ? 'cursor-none'
+    : showOverflowCursor ? 'cursor-pointer'
+    : showMoveCursor ? 'cursor-move'
+    : '';
 
   /**
    * Renders a layer list (bottom-to-top) as nested Konva Groups.
@@ -1948,6 +1963,8 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
             onSelectLine={onTextLineSelectionChange ? (lineIndex) => onTextLineSelectionChange({ layerId: layer.id, lineIndex }) : undefined}
             scale={scale}
             onHoverChange={setHoveringTextBody}
+            onAutoFitHeight={() => onAutoFitTextHeight(layer.id)}
+            onOverflowHoverChange={setHoveringOverflowIndicator}
           />
         )}
 

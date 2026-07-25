@@ -24,6 +24,15 @@ interface TextLayerNodeProps {
   /** Hovering the box body (not a Transformer handle, which sits on top and wins the hit-test
    *  first) vs. leaving it — drives the move-cursor StudioCanvas.tsx shows over the container. */
   onHoverChange?: (hovering: boolean) => void;
+  /** Double-clicking the ⊞ overflow indicator auto-fits the box's fixedHeight to its content —
+   *  undoable, separate from the Transformer-handle dblclick in StudioCanvas.tsx which only
+   *  auto-fits width. Only reachable while `layout.overflowing` is true (the indicator that calls
+   *  this doesn't render otherwise). */
+  onAutoFitHeight?: () => void;
+  /** Hovering the ⊞ overflow indicator itself (not the box body) — drives a pointer cursor over
+   *  the canvas container, taking priority over the box-body move cursor since the indicator sits
+   *  at/on the box's bottom edge. Mirrors onHoverChange's shape. */
+  onOverflowHoverChange?: (hovering: boolean) => void;
 }
 
 /**
@@ -51,9 +60,14 @@ function selectModeFor(evt: MouseEvent | TouchEvent): LayerSelectMode {
  */
 export function TextLayerNode({
   layer, groupRef, editing, selected, draggable, onSelect, onEdit, onUpdate, onSelectLine, scale = 1, onHoverChange,
+  onAutoFitHeight, onOverflowHoverChange,
 }: TextLayerNodeProps) {
   const text = layer.text!;
   const layout = useMemo(() => layoutText(text), [text]);
+  // Area text with a fixed frame: clips glyph content at the box's bottom edge. Unconditional on
+  // fixedHeight being set, not gated on layout.overflowing — the boundary this rect draws is the
+  // same one naturalHeight > fixedHeight checks, so there's no discontinuity right at the threshold.
+  const fixedHeightClip = !text.autoWidth && text.fixedHeight != null;
 
   const gradient = text.gradient?.enabled ? text.gradient : null;
   // One ramp across the whole layer, not one per run: the vector is computed on the layout box and
@@ -166,34 +180,48 @@ export function TextLayerNode({
         onMouseLeave={() => onHoverChange?.(false)}
       />
 
-      {layout.runs.map((run, i) => (
-        <KonvaText
-          key={i}
-          x={run.x}
-          y={run.y}
-          text={run.text}
-          fontFamily={run.style.fontFamily}
-          fontSize={run.style.fontSize}
-          fontStyle={`${run.style.italic ? 'italic ' : ''}${run.style.fontWeight}`}
-          letterSpacing={run.style.letterSpacing}
-          // Already laid out: one line, no wrapping, no alignment box.
-          wrap="none"
-          lineHeight={1}
-          fill={run.style.color}
-          fillPriority={gradient ? 'linear-gradient' : 'color'}
-          fillLinearGradientColorStops={gradient ? [0, gradient.from, 1, gradient.to] : undefined}
-          fillLinearGradientStartPoint={ramp ? { x: ramp.start.x - run.x, y: ramp.start.y - run.y } : undefined}
-          fillLinearGradientEndPoint={ramp ? { x: ramp.end.x - run.x, y: ramp.end.y - run.y } : undefined}
-          shadowEnabled={text.shadow?.enabled ?? false}
-          shadowColor={text.shadow?.color}
-          shadowBlur={text.shadow?.blur}
-          shadowOffsetX={text.shadow?.offsetX}
-          shadowOffsetY={text.shadow?.offsetY}
-          stroke={text.strokeWidth > 0 ? text.strokeColor : undefined}
-          strokeWidth={text.strokeWidth}
-          listening={false}
-        />
-      ))}
+      {/* Glyphs only — clipped to the fixed-height frame when one is set. Scoped to this inner
+          Group rather than the outer Group above: the outer Group also carries UI chrome (the W×H
+          readout, the ⊞ indicator, per-line hit rects) that must stay visible/clickable even while
+          content past fixedHeight is being clipped away. Konva clip areas nest via ordinary canvas
+          save/clip/restore, so this composes for free with the outer Group's own Type Region
+          clipFunc without any manual path-combining. */}
+      <Group
+        listening={false}
+        clipX={0}
+        clipY={0}
+        clipWidth={fixedHeightClip ? Math.max(layout.width, 4) : undefined}
+        clipHeight={fixedHeightClip ? text.fixedHeight : undefined}
+      >
+        {layout.runs.map((run, i) => (
+          <KonvaText
+            key={i}
+            x={run.x}
+            y={run.y}
+            text={run.text}
+            fontFamily={run.style.fontFamily}
+            fontSize={run.style.fontSize}
+            fontStyle={`${run.style.italic ? 'italic ' : ''}${run.style.fontWeight}`}
+            letterSpacing={run.style.letterSpacing}
+            // Already laid out: one line, no wrapping, no alignment box.
+            wrap="none"
+            lineHeight={1}
+            fill={run.style.color}
+            fillPriority={gradient ? 'linear-gradient' : 'color'}
+            fillLinearGradientColorStops={gradient ? [0, gradient.from, 1, gradient.to] : undefined}
+            fillLinearGradientStartPoint={ramp ? { x: ramp.start.x - run.x, y: ramp.start.y - run.y } : undefined}
+            fillLinearGradientEndPoint={ramp ? { x: ramp.end.x - run.x, y: ramp.end.y - run.y } : undefined}
+            shadowEnabled={text.shadow?.enabled ?? false}
+            shadowColor={text.shadow?.color}
+            shadowBlur={text.shadow?.blur}
+            shadowOffsetX={text.shadow?.offsetX}
+            shadowOffsetY={text.shadow?.offsetY}
+            stroke={text.strokeWidth > 0 ? text.strokeColor : undefined}
+            strokeWidth={text.strokeWidth}
+            listening={false}
+          />
+        ))}
+      </Group>
 
       {selected && !editing && (
         <Line
@@ -220,18 +248,57 @@ export function TextLayerNode({
         />
       ))}
 
-      {/* Overflow indicator for a fixed-height area frame — laid-out content exceeds it, so some
-          lines are being clipped rather than silently lost off-frame. Bottom-center, matching
-          Photoshop's own placement for this glyph. */}
+      {/* Overflow indicator for a fixed-height area frame — laid-out content exceeds it and is
+          actually being clipped at the bottom edge (see the inner glyph-clip Group above), not
+          just silently lost off-frame. Bottom-center, straddling the box's bottom edge, matching
+          Photoshop's own placement. Sized in /scale units so the square reads as a fixed ~16
+          on-screen px square at any zoom — this file's convention is dividing individual size/
+          offset values by scale (as the W×H readout below already does), not wrapping in a
+          counter-scaled Group. Not gated on `selected`: visible whether or not the layer is
+          selected. A single click/tap is a deliberate no-op (cancelBubble stops it reaching the
+          parent Group's own onClick/onDblClick, which would otherwise select/deselect or enter
+          edit mode); a double-click/tap auto-fits the frame height to content, undoably. */}
       {layout.overflowing && (
-        <KonvaText
-          text="⊞"
-          x={Math.max(layout.width, 4) / 2 - 7}
-          y={(text.fixedHeight ?? layout.height) - 16}
-          fontSize={14}
-          fill="#f59e0b"
-          listening={false}
-        />
+        <Group
+          x={Math.max(layout.width, 4) / 2}
+          y={text.fixedHeight ?? layout.height}
+          onClick={(e) => {
+            e.cancelBubble = true;
+            e.evt?.preventDefault();
+            e.evt?.stopPropagation();
+            // TODO: text threading — clicking ⊞ will link this box to another text box
+            //       so overflow content flows into the linked box automatically.
+          }}
+          onTap={(e) => {
+            e.cancelBubble = true;
+            e.evt?.preventDefault();
+            e.evt?.stopPropagation();
+            // TODO: text threading — clicking ⊞ will link this box to another text box
+            //       so overflow content flows into the linked box automatically.
+          }}
+          onDblClick={(e) => { e.cancelBubble = true; onAutoFitHeight?.(); }}
+          onDblTap={(e) => { e.cancelBubble = true; onAutoFitHeight?.(); }}
+          onMouseEnter={() => onOverflowHoverChange?.(true)}
+          onMouseLeave={() => onOverflowHoverChange?.(false)}
+        >
+          <Rect
+            x={-8 / scale}
+            y={-8 / scale}
+            width={16 / scale}
+            height={16 / scale}
+            fill="#fffbeb"
+            stroke="#78350f"
+            strokeWidth={1 / scale}
+          />
+          <KonvaText
+            text="⊞"
+            x={-7 / scale}
+            y={-7.5 / scale}
+            fontSize={14 / scale}
+            fill="#78350f"
+            listening={false}
+          />
+        </Group>
       )}
 
       {/* W×H readout while selected (not mid-edit, not mid-drag — the live drag has its own
