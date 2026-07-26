@@ -52,6 +52,20 @@ function drawTextLayer(ctx: CanvasRenderingContext2D, text: TextLayerData) {
     ctx.clip();
   }
 
+  // Fixed-height area frame: clips flattened export at the box's bottom edge, matching the live
+  // canvas render (TextLayerNode.tsx's inner glyph-clip Group). Coordinates are page-space here
+  // (this ctx was only rotated about the layer's center, never translated to the layer's own
+  // origin), unlike Konva's local-space clipFunc — used as text.x/text.y/layout.width directly, no
+  // subtraction needed. Unconditional on fixedHeight being set, not gated on layout.overflowing —
+  // same reasoning as the live render. Native ctx.clip() intersects with whatever's already
+  // clipped in this save() scope, so this correctly ANDs with the Type Region clip above.
+  if (!text.autoWidth && text.fixedHeight != null) {
+    ctx.beginPath();
+    ctx.rect(text.x, text.y, layout.width, text.fixedHeight);
+    ctx.closePath();
+    ctx.clip();
+  }
+
   ctx.textBaseline = 'top';
   ctx.textAlign = 'left'; // alignment is already baked into each run's x by the layout
 

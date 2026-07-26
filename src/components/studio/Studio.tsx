@@ -1030,6 +1030,20 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     }));
   }
 
+  /** Double-clicking a text layer's own ⊞ overflow indicator: fits fixedHeight tightly to the
+   *  content it's currently holding, undoably — the height counterpart to the existing width
+   *  auto-fit on a Transformer-handle dblclick (StudioCanvas.tsx), but a separate mechanism (fires
+   *  on the indicator's own Konva node, not the Transformer). No-op for point text (autoWidth has
+   *  no fixedHeight concept). */
+  function handleAutoFitTextHeight(id: string) {
+    const layer = findLayer(layers, id);
+    if (!layer || layer.type !== 'text' || !layer.text || layer.text.autoWidth) return;
+    const fitted = Math.max(20, layoutText(layer.text).height);
+    updateLayers(current => updateLayer(current, id, l =>
+      l.type === 'text' && l.text ? { ...l, text: { ...l.text, fixedHeight: fitted } } : l
+    ), 'Auto-Fit Text Box Height');
+  }
+
   function handleUpdatePathLayer(id: string, patch: Partial<PathLayerData>) {
     updateLayers(current => updateLayer(current, id, l =>
       l.type === 'path' && l.path ? { ...l, path: { ...l.path, ...patch } } : l
@@ -1422,6 +1436,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
       onAddTextLayer={handleAddTextLayer}
       fontFamilies={allFontFamilies}
       onUpdateTextLayer={handleUpdateTextLayer}
+      onAutoFitTextHeight={handleAutoFitTextHeight}
       onUpdatePathLayer={handleUpdatePathLayer}
       onAddPathLayer={handleAddPathLayer}
       onTextSelectionChange={setTextSelection}
