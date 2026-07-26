@@ -1,4 +1,5 @@
-import type { AdjustmentLayerData } from '../components/studio/studioTypes';
+import type { AdjustmentLayerData, ColorBalanceRange, CurvePoint } from '../components/studio/studioTypes';
+import { hexToRgb } from './color';
 
 /**
  * Konva-compatible custom filters (`(imageData: ImageData) => void`, mutating `.data` in place).
@@ -93,6 +94,161 @@ export function levelsFilter(inBlack: number, inWhite: number, gamma: number, ou
   };
 }
 
+/**
+ * 256-entry input->output LUT through `points` via monotonic Catmull-Rom interpolation — the same
+ * tangent technique `pathGeometry.ts`'s `applyCurvatureSmoothing` uses for the Pen tool's Curvature
+ * mode, adapted from 2D path anchors to 1D input->output samples. Clamps (doesn't extrapolate)
+ * outside the first/last point, matching Photoshop's own curve behaviour.
+ *
+ * Exported so `CurvesEditor.tsx` samples this directly for its on-screen curve preview — the editor
+ * and the actual filter must never have two separate interpolation implementations to drift apart.
+ */
+export function curveLut(points: CurvePoint[]): Uint8ClampedArray {
+  const pts = [...points].sort((a, b) => a.input - b.input);
+  const lut = new Uint8ClampedArray(256);
+  if (pts.length < 2) {
+    for (let v = 0; v < 256; v++) lut[v] = v;
+    return lut;
+  }
+  for (let v = 0; v < 256; v++) {
+    if (v <= pts[0].input) { lut[v] = clamp255(pts[0].output); continue; }
+    if (v >= pts[pts.length - 1].input) { lut[v] = clamp255(pts[pts.length - 1].output); continue; }
+    let i = 0;
+    while (i < pts.length - 2 && v > pts[i + 1].input) i++;
+    const p1 = pts[i], p2 = pts[i + 1];
+    // At a real boundary (no actual neighbor on that side) reflect the far point through the near
+    // one instead of duplicating it — duplicating collapses the tangent formula's (next-prev)/2 to
+    // half the segment's own slope, which visibly bows a plain 2-point "identity" curve instead of
+    // leaving it dead straight.
+    const p0 = i > 0 ? pts[i - 1] : { input: p1.input - (p2.input - p1.input), output: p1.output - (p2.output - p1.output) };
+    const p3 = i + 2 < pts.length ? pts[i + 2] : { input: p2.input + (p2.input - p1.input), output: p2.output + (p2.output - p1.output) };
+    const span = Math.max(1, p2.input - p1.input);
+    const t = (v - p1.input) / span;
+    const m0 = (p2.output - p0.output) / 2;
+    const m1 = (p3.output - p1.output) / 2;
+    const t2 = t * t, t3 = t2 * t;
+    const out = (2 * t3 - 3 * t2 + 1) * p1.output + (t3 - 2 * t2 + t) * m0
+      + (-2 * t3 + 3 * t2) * p2.output + (t3 - t2) * m1;
+    lut[v] = clamp255(out);
+  }
+  return lut;
+}
+
+export function curvesFilter(rgb: CurvePoint[]) {
+  const lut = curveLut(rgb);
+  return (imageData: ImageData) => {
+    const d = imageData.data;
+    for (let i = 0; i < d.length; i += 4) {
+      d[i] = lut[d[i]]; d[i + 1] = lut[d[i + 1]]; d[i + 2] = lut[d[i + 2]];
+    }
+  };
+}
+
+export function exposureFilter(exposure: number, offset: number, gamma: number) {
+  // Photoshop's exposure operates in linear light: multiply by 2^exposure, add offset, then
+  // gamma-correct — all in 0..1 float space, converting back to 0..255 at the end.
+  const mult = Math.pow(2, exposure);
+  const invGamma = 1 / Math.max(0.01, gamma);
+  const lut = new Uint8ClampedArray(256);
+  for (let v = 0; v < 256; v++) {
+    const linear = (v / 255) * mult + offset;
+    lut[v] = clamp255(Math.pow(Math.max(0, linear), invGamma) * 255);
+  }
+  return (imageData: ImageData) => {
+    const d = imageData.data;
+    for (let i = 0; i < d.length; i += 4) {
+      d[i] = lut[d[i]]; d[i + 1] = lut[d[i + 1]]; d[i + 2] = lut[d[i + 2]];
+    }
+  };
+}
+
+export function vibranceFilter(vibrance: number) {
+  const amt = vibrance / 100; // -1..1
+  return (imageData: ImageData) => {
+    const d = imageData.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const [h, s, l] = rgbToHsl(d[i], d[i + 1], d[i + 2]);
+      // Boost is strongest on low-saturation pixels and tapers toward already-saturated ones — the
+      // "smart"/skin-protective behaviour that differentiates vibrance from a flat saturation slider.
+      const boost = amt >= 0 ? amt * (1 - s) : amt * s;
+      const ns = Math.min(1, Math.max(0, s + boost));
+      const [r, g, b] = hslToRgb(h, ns, l);
+      d[i] = r; d[i + 1] = g; d[i + 2] = b;
+    }
+  };
+}
+
+export function colorBalanceFilter(cb: AdjustmentLayerData['colorBalance']) {
+  return (imageData: ImageData) => {
+    const d = imageData.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const r = d[i], g = d[i + 1], b = d[i + 2];
+      const lum = (r + g + b) / 3 / 255;
+      // Classic Photoshop tonal-range weights: shadows peak near lum=0, highlights near lum=1,
+      // midtones in between.
+      const wShadow = Math.max(0, 1 - lum * 2);
+      const wHighlight = Math.max(0, lum * 2 - 1);
+      const wMid = 1 - wShadow - wHighlight;
+      const apply = (channel: number, key: keyof ColorBalanceRange) => {
+        const delta = (cb.shadows[key] * wShadow + cb.midtones[key] * wMid + cb.highlights[key] * wHighlight) * 0.5;
+        return clamp255(channel + delta);
+      };
+      const nr = apply(r, 'cyanRed'), ng = apply(g, 'magentaGreen'), nb = apply(b, 'yellowBlue');
+      if (cb.preserveLuminosity) {
+        const newLum = (nr + ng + nb) / 3;
+        const lumDelta = lum * 255 - newLum;
+        d[i] = clamp255(nr + lumDelta); d[i + 1] = clamp255(ng + lumDelta); d[i + 2] = clamp255(nb + lumDelta);
+      } else {
+        d[i] = nr; d[i + 1] = ng; d[i + 2] = nb;
+      }
+    }
+  };
+}
+
+export function posterizeFilter(levels: number) {
+  const n = Math.max(2, Math.min(255, Math.round(levels)));
+  const lut = new Uint8ClampedArray(256);
+  for (let v = 0; v < 256; v++) {
+    lut[v] = clamp255(Math.round((Math.round((v / 255) * (n - 1)) / (n - 1)) * 255));
+  }
+  return (imageData: ImageData) => {
+    const d = imageData.data;
+    for (let i = 0; i < d.length; i += 4) {
+      d[i] = lut[d[i]]; d[i + 1] = lut[d[i + 1]]; d[i + 2] = lut[d[i + 2]];
+    }
+  };
+}
+
+export function thresholdFilter(threshold: number) {
+  return (imageData: ImageData) => {
+    const d = imageData.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const lum = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      const v = lum >= threshold ? 255 : 0;
+      d[i] = v; d[i + 1] = v; d[i + 2] = v;
+    }
+  };
+}
+
+export function gradientMapFilter(from: { r: number; g: number; b: number }, to: { r: number; g: number; b: number }) {
+  // 256x3-entry LUT, indexed by luminance — same LUT-then-apply approach as levels/curves, just 3
+  // output bytes per entry instead of 1.
+  const lut = new Uint8ClampedArray(256 * 3);
+  for (let v = 0; v < 256; v++) {
+    const t = v / 255;
+    lut[v * 3] = clamp255(from.r + (to.r - from.r) * t);
+    lut[v * 3 + 1] = clamp255(from.g + (to.g - from.g) * t);
+    lut[v * 3 + 2] = clamp255(from.b + (to.b - from.b) * t);
+  }
+  return (imageData: ImageData) => {
+    const d = imageData.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const lum = Math.round(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]);
+      d[i] = lut[lum * 3]; d[i + 1] = lut[lum * 3 + 1]; d[i + 2] = lut[lum * 3 + 2];
+    }
+  };
+}
+
 export function filterForAdjustment(data: AdjustmentLayerData): (imageData: ImageData) => void {
   switch (data.kind) {
     case 'brightness-contrast':
@@ -101,6 +257,20 @@ export function filterForAdjustment(data: AdjustmentLayerData): (imageData: Imag
       return hueSaturationFilter(data.hue, data.saturation, data.lightness);
     case 'levels':
       return levelsFilter(data.levels.inBlack, data.levels.inWhite, data.levels.gamma, data.levels.outBlack, data.levels.outWhite);
+    case 'curves':
+      return curvesFilter(data.curves.rgb);
+    case 'exposure':
+      return exposureFilter(data.exposure, data.exposureOffset, data.exposureGamma);
+    case 'vibrance':
+      return vibranceFilter(data.vibrance);
+    case 'color-balance':
+      return colorBalanceFilter(data.colorBalance);
+    case 'posterize':
+      return posterizeFilter(data.posterizeLevels);
+    case 'threshold':
+      return thresholdFilter(data.threshold);
+    case 'gradient-map':
+      return gradientMapFilter(hexToRgb(data.gradientMap.from), hexToRgb(data.gradientMap.to));
   }
 }
 
