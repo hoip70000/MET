@@ -45,6 +45,23 @@ test('a new raster layer is seeded with a copy of the background', async ({ page
   expect(near(c.r, GREY)).toBe(true);
 });
 
+test('Alt-click Add creates a truly blank layer, no background copy', async ({ page }) => {
+  await page.getByRole('button', { name: 'Add layer' }).click({ modifiers: ['Alt'] });
+  await expect(page.getByText('Layer 1', { exact: true })).toBeVisible();
+  await page.waitForTimeout(500);
+
+  // With the background still visible, a transparent top layer shows it through unchanged.
+  const withBackground = await sampleStageColor(page);
+  expect(near(withBackground.r, GREY)).toBe(true);
+
+  // Hiding the background exposes the blank layer's own (empty) content — unlike a plain "Add
+  // layer" click, which is seeded with a copy and would still read back as grey here.
+  await page.locator('[aria-label="Hide Background"]').click();
+  await page.waitForTimeout(400);
+  const backgroundHidden = await sampleStageColor(page);
+  expect(near(backgroundHidden.r, GREY)).toBe(false);
+});
+
 test('multiply blends against the background', async ({ page }) => {
   await addLayerAndOpenItsRow(page);
   await page.getByRole('combobox', { name: 'Blend' }).selectOption('multiply');

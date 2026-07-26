@@ -30,6 +30,7 @@ export interface MenuActions {
   fit: () => void;
   toggleDock: () => void;
   addLayer: () => void;
+  addBlankLayer: () => void;
   duplicateLayer: () => void;
   deleteLayer: () => void;
   moveLayerUp: () => void;
@@ -143,6 +144,7 @@ export function buildMenus(a: MenuActions): MenuDef[] {
       label: 'Layer',
       items: [
         { id: 'add-layer', label: 'New Layer', action: a.addLayer },
+        { id: 'add-blank-layer', label: 'New Blank Layer', action: a.addBlankLayer },
         { id: 'duplicate-layer', label: 'Duplicate Layer', action: a.duplicateLayer, disabled: !a.hasActiveLayer },
         { id: 'delete-layer', label: 'Delete Layer', action: a.deleteLayer, disabled: !a.hasActiveLayer },
         { id: 'sep1', label: '', separator: true },
