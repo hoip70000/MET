@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { cn, IconButton } from '../ui';
+import { cn, IconButton, Modal } from '../ui';
 import type { Page, ProcessedImage } from '../../types';
 import { StudioToolbar } from './StudioToolbar';
 import { StudioCanvas, loadImageFromSrc, type StudioCanvasHandle, type TextSelection, type TextLineSelection } from './StudioCanvas';
@@ -39,9 +39,11 @@ import { renderFlattenedPage, compositeFlattenedSlice, downloadBlob } from '../.
 import JSZip from 'jszip';
 import {
   createBackgroundLayer, createLayer, createTextLayer, createAdjustmentLayer, createGroupLayer, createPathLayer, parseTyperScript,
-  createLayerMask, DEFAULT_TYPER_STYLES, DEFAULT_TYPER_FOLDERS, FONT_FAMILIES, type StudioLayer, type TextLayerData, type PathLayerData, type PathAnchor,
-  type TyperStyle, type TyperFolder, type AdjustmentLayerData, type LayerSelectMode,
+  createLayerMask, DEFAULT_TYPER_STYLES, DEFAULT_TYPER_FOLDERS, FONT_FAMILIES, BLEND_TO_COMPOSITE, type StudioLayer, type TextLayerData, type PathLayerData, type PathAnchor,
+  type TyperStyle, type TyperFolder, type AdjustmentLayerData, type AdjustmentKind, type LayerSelectMode, type TextAlign,
 } from './studioTypes';
+import { applyCharPatch, resolveCharValue } from './textRuns';
+import { getClipboardLayer, setClipboardLayer } from '../../lib/layerClipboard';
 import { layoutText, isArabicMajority } from './textLayout';
 import { FontsPanel } from './FontsPanel';
 import { BrushesPanel } from './BrushesPanel';
@@ -62,8 +64,11 @@ interface StudioProps {
   /** Text sent from the standalone Text Editor page's "Send to TypeR" button, waiting to be picked up. */
   pendingTyperScript?: string | null;
   onConsumePendingTyperScript?: () => void;
-  /** Persists page image changes (currently just Crop) back up to the workspace tree. */
+  /** Persists page image changes (currently just Crop and Rotate Canvas) back up to the workspace tree. */
   onPagesChange?: (pages: Page[]) => void;
+  /** Project > Export as .msp — the existing workspace-level .msp export (App.tsx), threaded down so
+   *  it's reachable from inside a chapter without Studio needing the whole `Workspace` object itself. */
+  onExportMsp?: () => void;
 }
 
 export function Studio(props: StudioProps) {
@@ -78,7 +83,7 @@ export function Studio(props: StudioProps) {
   );
 }
 
-function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript, onConsumePendingTyperScript, onPagesChange }: StudioProps) {
+function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript, onConsumePendingTyperScript, onPagesChange, onExportMsp }: StudioProps) {
   const canvasRef = useRef<StudioCanvasHandle>(null);
   const { foreground, background, setForeground, swap: swapColors, reset: resetColors } = useColor();
   const history = useHistory();
@@ -212,6 +217,9 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [panelsHidden, setPanelsHidden] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const [toolRailVisible, setToolRailVisible] = useState(true);
+  const [optionsBarVisible, setOptionsBarVisible] = useState(true);
 
   useEffect(() => {
     function onFullscreenChange() { setIsFullscreen(document.fullscreenElement === studioRootRef.current); }
@@ -228,6 +236,13 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
       });
     }
   }
+
+  function toggleToolRail() { setToolRailVisible(v => !v); }
+  function toggleOptionsBar() { setOptionsBarVisible(v => !v); }
+  /** AI > Content-Aware Fill / Image > Apply Filter > Distort > Liquify — both switch to an existing
+   *  real brush-driven tool rather than opening a dialog; see toolGroups.ts for `contentAware`/`liquify`. */
+  function switchToContentAwareFill() { setActiveTool('contentAware'); }
+  function switchToLiquify() { setActiveTool('liquify'); }
 
   useStudioShortcuts({
     onToolChange: (id) => setActiveTool(id),
@@ -246,6 +261,17 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     onToggleQuickMask: handleToggleQuickMask,
     onTextSizeStep: handleTextSizeStep,
     onDeselect: () => setSelection(NO_SELECTION),
+    onActualSize: () => canvasRef.current?.zoomTo(1),
+    onCutLayer: () => handleCutLayer(),
+    onCopyLayer: () => handleCopyLayer(),
+    onPasteLayer: () => handlePasteLayer(),
+    onFindReplace: handleOpenFindReplace,
+    onToggleTextBold: handleToggleTextBold,
+    onToggleTextItalic: handleToggleTextItalic,
+    onToggleRulers: () => setShowRulers(v => !v),
+    onToggleGrid: () => setShowGrid(v => !v),
+    onNewLayer: () => handleAddLayer(),
+    onMergeVisible: () => handleMergeVisible(),
   });
   const [activePageId, setActivePageId] = useState<string | null>(pages[0]?.id ?? null);
   const [pagesManagerOpen, setPagesManagerOpen] = useState(pages.length === 0);
@@ -771,11 +797,204 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     }
   }
 
+  /**
+   * `LayersPanel`'s own "Add adjustment layer" button passes this straight to `onClick`
+   * (`onClick={onAddAdjustment}`), so React hands it the click event as a real runtime argument —
+   * a default parameter here would never apply (defaults only kick in for `undefined`, not "some
+   * other value was passed"). Keeping this a true zero-arg function and giving the
+   * Image-menu-with-a-kind path its own separate wrapper avoids that exact footgun.
+   */
   function handleAddAdjustmentLayer() {
-    const layer = createAdjustmentLayer('brightness-contrast');
+    handleAddAdjustmentLayerOfKind('brightness-contrast');
+  }
+
+  function handleAddAdjustmentLayerOfKind(kind: AdjustmentKind) {
+    const layer = createAdjustmentLayer(kind);
     updateLayers(current => [...current, layer], 'Add Adjustment Layer');
     setActiveLayerId(layer.id);
     dock.selectTab('adjustment');
+  }
+
+  /** Edit > Copy: clones the active layer (and its subtree, if it's a group) under fresh ids with
+   *  real, independent canvas backing — see lib/layerClipboard.ts's doc comment for why this makes
+   *  the clipboard entry safe to keep around after the original is edited or deleted. */
+  function handleCopyLayer() {
+    if (!activeLayerId) return;
+    const source = findLayer(layers, activeLayerId);
+    if (!source || source.isBackground) return;
+    const { copy, idMap } = cloneSubtree(source);
+    canvasRef.current?.clonePaintCanvases(idMap);
+    canvasRef.current?.cloneMaskCanvases(idMap);
+    const previous = setClipboardLayer(copy);
+    if (previous) {
+      canvasRef.current?.deletePaintCanvas(previous.id);
+      if (previous.mask) canvasRef.current?.deleteMaskCanvas(previous.mask.id);
+    }
+  }
+
+  function handleCutLayer() {
+    if (!activeLayerId) return;
+    const source = findLayer(layers, activeLayerId);
+    if (!source || source.isBackground) return;
+    handleCopyLayer();
+    handleDeleteLayers([activeLayerId]);
+  }
+
+  /** Always clones the stashed entry again under yet another fresh id, so pasting twice can't
+   *  collide, and the clipboard itself stays intact for further pastes. */
+  function handlePasteLayer() {
+    const clip = getClipboardLayer();
+    if (!clip) return;
+    const { copy, idMap } = cloneSubtree(clip);
+    canvasRef.current?.clonePaintCanvases(idMap);
+    canvasRef.current?.cloneMaskCanvases(idMap);
+    updateLayers(current => [...current, copy], 'Paste Layer');
+    setSelectedLayerIds([copy.id]);
+  }
+
+  function handleOpenFindReplace() {
+    setRightOpen(true);
+    dock.selectTab('translation');
+  }
+
+  function handleSaveProjectNow() {
+    flushAutosave();
+    swalToast({ icon: 'success', title: 'Saved' });
+  }
+
+  /** Layer > Merge Down: only for two adjacent raster layers — the common case, and the one
+   *  Photoshop's own Merge Down is used for most often. Groups/adjustments/text below the active
+   *  layer disable the menu item rather than attempting a merge this app's layer model can't
+   *  express simply (an adjustment or group has no single raster canvas to draw the active layer
+   *  onto). */
+  function handleMergeDown() {
+    if (!activeLayerId) return;
+    const active = findLayer(layers, activeLayerId);
+    if (!active || active.type !== 'clean-patch') return;
+    const below = layerBelowActive;
+    if (!below || below.type !== 'clean-patch') return;
+    const topCanvas = canvasRef.current?.getPaintCanvas(active.id);
+    const bottomCanvas = canvasRef.current?.getPaintCanvas(below.id);
+    if (!topCanvas || !bottomCanvas) return;
+    const ctx = bottomCanvas.getContext('2d');
+    if (!ctx) return;
+    const before = ctx.getImageData(0, 0, bottomCanvas.width, bottomCanvas.height);
+    ctx.save();
+    ctx.globalAlpha = active.opacity;
+    ctx.globalCompositeOperation = BLEND_TO_COMPOSITE[active.blendMode] ?? 'source-over';
+    ctx.drawImage(topCanvas, 0, 0);
+    ctx.restore();
+    const after = ctx.getImageData(0, 0, bottomCanvas.width, bottomCanvas.height);
+    const belowId = below.id;
+    history.push({
+      label: 'Merge Down',
+      undo: () => { ctx.putImageData(before, 0, 0); canvasRef.current?.redrawLayer(belowId); },
+      redo: () => { ctx.putImageData(after, 0, 0); canvasRef.current?.redrawLayer(belowId); },
+    });
+    canvasRef.current?.redrawLayer(belowId);
+    canvasRef.current?.deletePaintCanvas(active.id);
+    updateLayers(current => removeLayers(current, [active.id]));
+    setActiveLayerId(belowId);
+    scheduleAutosave();
+  }
+
+  /** Layer > Merge Visible: flattens the export snapshot (which already respects `.visible`) into
+   *  one new layer, then discards every root-level visible layer it replaces. Deliberately scoped to
+   *  root-level layers only — reaching into a visible group's own children would pull them out from
+   *  under the group instead of merging the group's composited appearance, which flattening the
+   *  snapshot already captured correctly. */
+  async function handleMergeVisible() {
+    const snapshot = canvasRef.current?.getExportSnapshot();
+    if (!snapshot) return;
+    const flatCanvas = await renderFlattenedPage(snapshot);
+    const layer = createLayer('clean-patch', 'Merged Visible');
+    const target = canvasRef.current?.getPaintCanvas(layer.id);
+    const ctx = target?.getContext('2d');
+    if (!target || !ctx) return;
+    ctx.clearRect(0, 0, target.width, target.height);
+    ctx.drawImage(flatCanvas, 0, 0);
+    const idsToRemove = layers.filter(l => !l.isBackground && l.visible).map(l => l.id);
+    updateLayers(current => [...removeLayers(current, idsToRemove), layer], 'Merge Visible');
+    idsToRemove.forEach(id => canvasRef.current?.deletePaintCanvas(id));
+    canvasRef.current?.redrawLayer(layer.id);
+    setActiveLayerId(layer.id);
+    scheduleAutosave();
+  }
+
+  /** Layer > Flatten Image: same flatten-the-snapshot mechanism as Merge Visible, but replaces
+   *  *every* layer above the locked Background root (visible or not — a hidden layer is discarded,
+   *  not merged in, matching Photoshop's own Flatten). The Background root itself is never replaced;
+   *  `layerTree.ts` enforces it stays at index 0 always, so "flatten" here means "collapse everything
+   *  above it into one layer," which looks identical on screen to a true single-layer flatten. */
+  async function handleFlattenImage() {
+    const snapshot = canvasRef.current?.getExportSnapshot();
+    if (!snapshot) return;
+    const flatCanvas = await renderFlattenedPage(snapshot);
+    const layer = createLayer('clean-patch', 'Flattened');
+    const target = canvasRef.current?.getPaintCanvas(layer.id);
+    const ctx = target?.getContext('2d');
+    if (!target || !ctx) return;
+    ctx.clearRect(0, 0, target.width, target.height);
+    ctx.drawImage(flatCanvas, 0, 0);
+    const idsToRemove = flattenTree(layers).filter(l => !l.isBackground).map(l => l.id);
+    updateLayers(current => [...removeLayers(current, idsToRemove), layer], 'Flatten Image');
+    idsToRemove.forEach(id => canvasRef.current?.deletePaintCanvas(id));
+    canvasRef.current?.redrawLayer(layer.id);
+    setActiveLayerId(layer.id);
+    scheduleAutosave();
+  }
+
+  /** Layer Properties.../Blending Options... both point at the one real place opacity/blend/mask/
+   *  clip controls live — the Layers panel's per-row expand strip — since neither is a separate
+   *  dialog in this app. */
+  function handleOpenLayerProperties() {
+    if (activeLayerId) setExpandedLayerId(activeLayerId);
+  }
+
+  /** Image > Rotate Canvas: transforms the background/raster canvases via StudioCanvasHandle's
+   *  rotateCanvas, then repositions text layers to match (mirroring how handleCommitCrop shifts them
+   *  for Crop) — path layers are left untouched, the same pre-existing scope limit Crop already has. */
+  async function handleRotateCanvas(dir: 'cw' | 'ccw' | '180' | 'flip-h' | 'flip-v') {
+    if (!activePage) return;
+    const result = await canvasRef.current?.rotateCanvas(dir);
+    if (!result) return;
+    const cw = activePage.original.width, ch = activePage.original.height;
+    const swapped = dir === 'cw' || dir === 'ccw';
+    function mapPoint(x: number, y: number): { x: number; y: number } {
+      switch (dir) {
+        case 'cw': return { x: ch - y, y: x };
+        case 'ccw': return { x: y, y: cw - x };
+        case '180': return { x: cw - x, y: ch - y };
+        case 'flip-h': return { x: cw - x, y };
+        case 'flip-v': return { x, y: ch - y };
+      }
+    }
+    onPagesChange?.(pages.map(p => p.id === activePage.id ? { ...p, original: result.original, cleaned: result.cleaned } : p));
+    updateLayers(current => mapTree(current, l => {
+      if (l.type !== 'text' || !l.text) return l;
+      const measured = layoutText(l.text);
+      const width = l.text.autoWidth ? measured.width : l.text.width;
+      const height = l.text.autoWidth ? measured.height : (l.text.fixedHeight ?? measured.height);
+      const corner = mapPoint(l.text.x, l.text.y);
+      const opposite = mapPoint(l.text.x + width, l.text.y + height);
+      const nx = Math.min(corner.x, opposite.x);
+      const ny = Math.min(corner.y, opposite.y);
+      let rotation = l.text.rotation;
+      if (dir === 'cw') rotation += 90;
+      else if (dir === 'ccw') rotation -= 90;
+      else if (dir === '180') rotation += 180;
+      else rotation = -rotation; // flip-h / flip-v mirror the angle
+      rotation = ((rotation % 360) + 360) % 360;
+      const nextText: TextLayerData = { ...l.text, x: nx, y: ny, rotation };
+      if (swapped && !l.text.autoWidth) {
+        nextText.width = height;
+        if (l.text.fixedHeight != null) nextText.fixedHeight = width;
+      }
+      return { ...l, text: nextText };
+    }), 'Rotate Canvas');
+    setSelection(NO_SELECTION);
+    setFitSignal(s => s + 1);
+    scheduleAutosave();
   }
 
   function handleRenameLayer(id: string, name: string) {
@@ -1132,6 +1351,63 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     });
   }
 
+  /** The Text menu's own character-range concept — the layer's whole content when nothing is
+   *  selected in the editing textarea, exactly mirroring TextPanel's `range` (see textRuns.ts's
+   *  applyCharPatch/resolveCharValue doc comments for why the two share one implementation). */
+  function activeTextRange(): { start: number; end: number } | null {
+    if (!activeLayer?.text) return null;
+    return textSelection && textSelection.layerId === activeLayer.id && textSelection.end > textSelection.start
+      ? textSelection
+      : null;
+  }
+
+  function handleToggleTextBold() {
+    if (!activeLayer?.text) return;
+    const range = activeTextRange();
+    const isBold = resolveCharValue(activeLayer.text, range, 'fontWeight') >= 600;
+    handleUpdateTextLayer(activeLayer.id, applyCharPatch(activeLayer.text, range, { bold: !isBold, fontWeight: undefined }));
+  }
+
+  function handleToggleTextItalic() {
+    if (!activeLayer?.text) return;
+    const range = activeTextRange();
+    const isItalic = resolveCharValue(activeLayer.text, range, 'italic');
+    handleUpdateTextLayer(activeLayer.id, applyCharPatch(activeLayer.text, range, { italic: !isItalic }));
+  }
+
+  function handleSetTextFontSize(size: number) {
+    if (!activeLayer?.text) return;
+    handleUpdateTextLayer(activeLayer.id, applyCharPatch(activeLayer.text, activeTextRange(), { fontSize: size }));
+  }
+
+  /** Align is a paragraph property (layer-wide), never a per-run override — matches TextPanel's own
+   *  align buttons, which always call `set({ align })` rather than `setChar`. */
+  function handleSetTextAlign(align: TextAlign) {
+    if (!activeLayer?.text) return;
+    handleUpdateTextLayer(activeLayer.id, { align });
+  }
+
+  // RTL/LTR: this app has no separate `dir` field — right alignment is the existing proxy for "this
+  // layer is RTL" that the editing textarea's own `dir` attribute already keys off (StudioCanvas.tsx),
+  // so setting align is the whole, real implementation rather than a stub with nothing to back it.
+  function handleSetTextRtl() { handleSetTextAlign('right'); }
+  function handleSetTextLtr() { handleSetTextAlign('left'); }
+
+  function handleOpenFontPanel() {
+    setRightOpen(true);
+    dock.selectTab('text');
+  }
+
+  function handleTriggerImportFonts() {
+    setRightOpen(true);
+    dock.selectTab('fonts');
+  }
+
+  function handleTriggerImportBrushes() {
+    setRightOpen(true);
+    dock.selectTab('brushes');
+  }
+
   const activeLayer = findLayer(layers, activeLayerId) ?? null;
 
   /** Stroke/Fill Path's bake target — same "topmost existing raster layer" convention the
@@ -1360,14 +1636,23 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     onExport: () => setExportOpen(true),
     onExportSlices: handleExportSlices,
     hasSliceRects: sliceRects.length > 0,
+    exportMsp: () => onExportMsp?.(),
+    saveProjectNow: handleSaveProjectNow,
     undo: history.undo,
     redo: history.redo,
     canUndo: history.canUndo,
     canRedo: history.canRedo,
+    cutLayer: handleCutLayer,
+    copyLayer: handleCopyLayer,
+    pasteLayer: handlePasteLayer,
+    canCopy: !!activeLayer && !activeLayer.isBackground,
+    canPaste: getClipboardLayer() !== null,
+    openFindReplace: handleOpenFindReplace,
     toggleCleaned: () => setShowCleaned(v => !v),
     zoomIn: () => canvasRef.current?.zoomIn(),
     zoomOut: () => canvasRef.current?.zoomOut(),
     fit: () => setFitSignal(s => s + 1),
+    actualSize: () => canvasRef.current?.zoomTo(1),
     toggleDock: () => setRightOpen(v => !v),
     addLayer: handleAddLayer,
     addBlankLayer: handleAddBlankLayer,
@@ -1395,11 +1680,38 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     },
     canMask: !!activeLayer && !activeLayer.isBackground && activeLayer.type !== 'adjustment',
     hasMask: activeLayer?.mask != null,
+    mergeDown: handleMergeDown,
+    canMergeDown: activeLayer?.type === 'clean-patch' && layerBelowActive?.type === 'clean-patch',
+    mergeVisible: () => { void handleMergeVisible(); },
+    flattenImage: () => { void handleFlattenImage(); },
+    layerProperties: handleOpenLayerProperties,
     addTextLayer: () => setActiveTool('text'),
     centerTextInBubble: () => activeLayerId && handleCenterTextLayer(activeLayerId),
     increaseTextSize: () => handleTextSizeStep(1),
     decreaseTextSize: () => handleTextSizeStep(-1),
     hasActiveTextLayer: activeLayer?.type === 'text',
+    textSetBold: handleToggleTextBold,
+    textSetItalic: handleToggleTextItalic,
+    textSetFontSize: handleSetTextFontSize,
+    textSetAlign: handleSetTextAlign,
+    textSetRtl: handleSetTextRtl,
+    textSetLtr: handleSetTextLtr,
+    openFontPanel: handleOpenFontPanel,
+    addAdjustmentLayerKind: handleAddAdjustmentLayerOfKind,
+    filtersEnabled: false,
+    applyFilter: () => {},
+    liquifyTool: switchToLiquify,
+    contentAwareFillTool: switchToContentAwareFill,
+    rotateCanvas: (dir) => { void handleRotateCanvas(dir); },
+    toolRailVisible,
+    toggleToolRail,
+    optionsBarVisible,
+    toggleOptionsBar,
+    resetLayoutEnabled: false,
+    resetPanelLayout: () => {},
+    aboutOpen: () => setAboutOpen(true),
+    triggerImportFonts: handleTriggerImportFonts,
+    triggerImportBrushes: handleTriggerImportBrushes,
     typerFloating,
     toggleTyperFloating: () => setTyperFloating(v => !v),
     panelTabs: allTabs.map(t => ({ id: t.id, label: t.label })),
@@ -1528,7 +1840,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
   // working exactly as it did as a single-region dock, just relocated.
   const toolsSidebar = (
     <div className="h-full flex">
-      <ToolRail activeTool={activeTool} onToolChange={setActiveTool} orientation="vertical" />
+      {toolRailVisible && <ToolRail activeTool={activeTool} onToolChange={setActiveTool} orientation="vertical" />}
       <div className="w-64 sm:w-72 h-full flex flex-col min-h-0">
         <div className={cn('shrink-0 min-h-0 overflow-hidden border-b border-hairline', colorPanelCollapsed ? 'h-10' : 'h-[45%]')}>
           {colorPanel}
@@ -1545,8 +1857,16 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
 
   return (
     <div ref={studioRootRef} className="studio-shell fixed inset-0 lg:relative lg:inset-auto studio-canvas-bg flex flex-col lg:rounded-panel lg:overflow-hidden lg:border lg:border-hairline lg:h-[calc(100vh-8.5rem)] z-30">
+      {/* No overflow-x here (there used to be one): per the CSS Overflow spec, 'overflow-x: auto'
+          with 'overflow-y' unset forces the *computed* overflow-y to 'auto' too — and that
+          coercion applies even if overflow-y is set to 'visible' explicitly, since 'visible' paired
+          with a non-'visible' sibling axis isn't a valid combination at all. Either way, this bar's
+          content clips to its own ~32px height, silently hiding every dropdown/submenu below it — a
+          plain DOM/visibility check can't catch it, since Playwright auto-scrolls a clipping
+          ancestor before interacting, which is exactly what made this look fine under automation.
+          Ten short menu labels fit comfortably down to a 768px-wide viewport without scrolling. */}
       {!panelsHidden && (
-        <div className="relative z-40 overflow-x-auto">
+        <div className="relative z-40">
           <MenuBar menus={menus} />
         </div>
       )}
@@ -1568,7 +1888,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
         onToggleTypeRegion={() => setTypeRegionArmed(v => !v)}
       />
 
-      {!panelsHidden && (
+      {!panelsHidden && optionsBarVisible && (
         <ToolOptionsBar
           activeTool={activeTool}
           size={brushSize}
@@ -1658,7 +1978,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
               <span className="w-10 h-1 rounded-full bg-ink/20" />
             </button>
             <div className="flex-1 min-h-0 flex flex-col-reverse">
-              <ToolRail activeTool={activeTool} onToolChange={setActiveTool} orientation="horizontal" />
+              {toolRailVisible && <ToolRail activeTool={activeTool} onToolChange={setActiveTool} orientation="horizontal" />}
               <div className="flex-1 min-h-0 flex flex-col border-x border-hairline">
                 <div className={cn('shrink-0 min-h-0 overflow-hidden border-b border-hairline', colorPanelCollapsed ? 'h-10' : 'h-[45%]')}>
                   {colorPanel}
@@ -1703,6 +2023,12 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
           typerProps={typerPanelProps}
         />
       )}
+      <Modal open={aboutOpen} onClose={() => setAboutOpen(false)} title="About MangaStudio" size="sm">
+        <div className="flex flex-col gap-2 text-ui text-ink">
+          <p>MangaStudio — manga/manhwa cleaning, translation, and typesetting.</p>
+          <p className="text-micro text-ink-faint">A browser-based Studio for cleaning scans, laying out dialogue, and exporting finished pages.</p>
+        </div>
+      </Modal>
     </div>
   );
 }
