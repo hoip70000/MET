@@ -30,6 +30,7 @@ export interface MenuActions {
   fit: () => void;
   toggleDock: () => void;
   addLayer: () => void;
+  addBlankLayer: () => void;
   duplicateLayer: () => void;
   deleteLayer: () => void;
   moveLayerUp: () => void;
@@ -80,6 +81,10 @@ export interface MenuActions {
   hasActivePathLayer: boolean;
   quickMaskActive: boolean;
   toggleQuickMask: () => void;
+  /** Separate from panelTabs/showPanel/isPanelVisible above — those are the swappable dock strip's
+   *  own tab-visibility concept; this is "is TypeR windowed at all," an orthogonal concept. */
+  typerFloating: boolean;
+  toggleTyperFloating: () => void;
 }
 
 export function buildMenus(a: MenuActions): MenuDef[] {
@@ -139,6 +144,7 @@ export function buildMenus(a: MenuActions): MenuDef[] {
       label: 'Layer',
       items: [
         { id: 'add-layer', label: 'New Layer', action: a.addLayer },
+        { id: 'add-blank-layer', label: 'New Blank Layer', action: a.addBlankLayer },
         { id: 'duplicate-layer', label: 'Duplicate Layer', action: a.duplicateLayer, disabled: !a.hasActiveLayer },
         { id: 'delete-layer', label: 'Delete Layer', action: a.deleteLayer, disabled: !a.hasActiveLayer },
         { id: 'sep1', label: '', separator: true },
@@ -185,6 +191,8 @@ export function buildMenus(a: MenuActions): MenuDef[] {
         ...a.panelTabs.map(t => ({
           id: `show-${t.id}`, label: `Show ${t.label}`, action: () => a.showPanel(t.id), checked: a.isPanelVisible(t.id),
         })),
+        { id: 'sep2', label: '', separator: true },
+        { id: 'typer-floating', label: 'Float TypeR', action: a.toggleTyperFloating, checked: a.typerFloating },
       ],
     },
     {

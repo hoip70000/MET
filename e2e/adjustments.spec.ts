@@ -100,6 +100,52 @@ test('hiding an adjustment removes it', async ({ page }) => {
   expect(near(c.r, GREY), `expected ~${GREY}, got ${c.r}`).toBe(true);
 });
 
+test('switching an adjustment to Threshold applies a hard black/white cutoff', async ({ page }) => {
+  await page.getByRole('button', { name: 'Add adjustment layer' }).click();
+  await page.getByRole('combobox', { name: 'Type' }).selectOption({ label: 'Threshold' });
+  await slider(page, 'Threshold').waitFor({ state: 'visible' });
+
+  // Page is flat grey 128. A threshold below that puts the page's own luminance "above" it -> white.
+  await slider(page, 'Threshold').fill('100');
+  await page.waitForTimeout(500);
+  let c = await sampleStageColor(page);
+  expect(near(c.r, 255), `expected white (255) at threshold 100, got ${c.r}`).toBe(true);
+
+  // A threshold above the page's luminance flips it to "below" -> black.
+  await slider(page, 'Threshold').fill('200');
+  await page.waitForTimeout(500);
+  c = await sampleStageColor(page);
+  expect(near(c.r, 0), `expected black (0) at threshold 200, got ${c.r}`).toBe(true);
+});
+
+test('dragging a Curves control point brightens the canvas live', async ({ page }) => {
+  await page.getByRole('button', { name: 'Add adjustment layer' }).click();
+  await page.getByRole('combobox', { name: 'Type' }).selectOption({ label: 'Curves' });
+
+  // The Adjustment section's own content area is short in the default sidebar layout (it shares
+  // the column with Color above and Layers below) — too short to fit the 200px-tall curves graph
+  // without clipping it. Collapsing both hands the whole column to Adjustment instead (the same
+  // chevron toggle a user would reach for), rather than resizing the browser viewport — which
+  // shifts the Stage's own fit-to-screen layout and breaks sampleStageColor's "sample the page's
+  // on-screen center" assumption.
+  await page.getByRole('button', { name: 'Collapse Color panel' }).click();
+  await page.getByRole('button', { name: 'Collapse Layers panel' }).click();
+
+  const graph = page.getByTestId('curves-graph');
+  await graph.waitFor({ state: 'visible' });
+  const box = (await graph.boundingBox())!;
+
+  // The page is flat grey 128, so clicking the graph's mid-x (input ~128) and raising the output
+  // to ~200 brightens the whole page uniformly — no need to target a specific canvas position.
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height * (1 - 200 / 255);
+  await page.mouse.click(x, y);
+  await page.waitForTimeout(600);
+
+  const c = await sampleStageColor(page);
+  expect(c.r, `expected the page to brighten past ${GREY}, got ${c.r}`).toBeGreaterThan(GREY + 20);
+});
+
 test('an adjustment inside a group still applies', async ({ page }) => {
   await page.getByRole('button', { name: 'Add layer' }).click();
   await page.waitForTimeout(300);

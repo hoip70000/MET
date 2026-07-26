@@ -11,6 +11,7 @@ import { RightDock } from './RightDock';
 import { LayersPanel } from './LayersPanel';
 import { TextPanel } from './TextPanel';
 import { TyperPanel } from './TyperPanel';
+import { TyperFloatingWindow } from './TyperFloatingWindow';
 import { ColorProvider, useColor } from './color/ColorContext';
 import { ColorPanel } from './color/ColorPanel';
 import { HistoryProvider, useHistory } from './history/HistoryContext';
@@ -320,6 +321,35 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
   const [typerFolders, setTyperFolders] = useState<TyperFolder[]>(DEFAULT_TYPER_FOLDERS);
   const [typerIndex, setTyperIndex] = useState(0);
   const [typerArmed, setTyperArmed] = useState(false);
+  // TypeR as a detached floating window — no floating-panel infrastructure exists anywhere else in
+  // this app, so this is scoped to TypeR specifically rather than a generic system nobody else
+  // needs yet. State lives here (not a new Context): only Studio.tsx and TyperFloatingWindow need
+  // it, and typerIndex/typerArmed/etc. above stay exactly where they are regardless of floating vs
+  // docked — StudioCanvas reads them for canvas-click placement either way. Persisted the same
+  // debounced-localStorage way DockContext persists the active dock tab; Studio.tsx fully unmounts
+  // on chapter switch (a fresh mount is a fresh chapter), so a lazy useState initializer is enough —
+  // no re-seed-on-chapterId-change effect needed.
+  const [typerFloating, setTyperFloating] = useState(() => {
+    try { return localStorage.getItem(`studio_typer_floating_${chapterId}`) === '1'; } catch { return false; }
+  });
+  const [typerFloatPos, setTyperFloatPos] = useState<{ x: number; y: number } | null>(() => {
+    try {
+      const raw = localStorage.getItem(`studio_typer_floating_pos_${chapterId}`);
+      return raw ? (JSON.parse(raw) as { x: number; y: number }) : null;
+    } catch {
+      return null;
+    }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(`studio_typer_floating_${chapterId}`, typerFloating ? '1' : '0'); } catch { /* not fatal */ }
+  }, [chapterId, typerFloating]);
+  useEffect(() => {
+    if (!typerFloatPos) return;
+    const t = setTimeout(() => {
+      try { localStorage.setItem(`studio_typer_floating_pos_${chapterId}`, JSON.stringify(typerFloatPos)); } catch { /* not fatal */ }
+    }, 400);
+    return () => clearTimeout(t);
+  }, [chapterId, typerFloatPos]);
   // Configurable versions of what used to be a hardcoded "##" ignore-prefix and an implicit
   // empty-prefix-style default, plus arbitrary mid-line tag stripping — mirrors the real TypeR
   // extension's ignoreLinePrefixes/ignoreTags/defaultStyleId settings.
@@ -704,6 +734,16 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     // "duplicate scan, clean the duplicate" manga workflow and gives clone/heal/filter-brush/
     // liquify tools real pixels to act on immediately instead of an empty transparent canvas.
     canvasRef.current?.seedLayerWithBackground(layer.id);
+  }
+
+  /** The explicit "I want a truly empty layer" action, alongside handleAddLayer's default
+   *  background-copy behavior above — reached via Alt-click on the Layers panel's Add button, or
+   *  Layer > New Blank Layer. Deliberately not seeded: getOrCreateCanvasFor hands back a bare
+   *  transparent canvas when nothing writes to it, so simply skipping the seed call is enough. */
+  function handleAddBlankLayer() {
+    const layer = createLayer('clean-patch', `Layer ${flattenTree(layers).length}`);
+    updateLayers(current => [...current, layer], 'Add Blank Layer');
+    setActiveLayerId(layer.id);
   }
 
   async function handleCreateWhitedPatchLayer(page: Page, whited: ProcessedImage) {
@@ -1143,7 +1183,10 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     if (quickMaskActive || activeMaskLayerId) return;
     if (!(PAINT_TOOLS as readonly string[]).includes(activeTool) || !activeLayer) return;
     if (activeLayer.type === 'clean-patch') return;
-    const existing = [...layers].reverse().find(l => l.type === 'clean-patch');
+    // flattenTree, not the raw root array — a clean-patch layer nested inside a group is otherwise
+    // invisible to this scan, so painting while a group holding one is active/collapsed would
+    // create a redundant new layer instead of reusing the one that already exists.
+    const existing = [...flattenTree(layers)].reverse().find(l => l.type === 'clean-patch');
     if (existing) {
       setActiveLayerId(existing.id);
     } else {
@@ -1172,6 +1215,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
       onOpacityChange={handleOpacityChange}
       onBlendChange={handleBlendChange}
       onAdd={handleAddLayer}
+      onAddBlank={handleAddBlankLayer}
       onAddAdjustment={handleAddAdjustmentLayer}
       onDuplicate={handleDuplicateLayer}
       onDelete={handleDeleteLayer}
@@ -1237,35 +1281,50 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
   const historyPanel = <HistoryPanel />;
   const fontsPanel = <FontsPanel onFamiliesChange={setCustomFontFamilies} />;
 
-  const typerPanel = (
-    <TyperPanel
-      script={typerScript}
-      onScriptChange={setTyperScript}
-      styles={typerStyles}
-      onStylesChange={setTyperStyles}
-      folders={typerFolders}
-      onFoldersChange={setTyperFolders}
-      ignoreLinePrefixes={ignoreLinePrefixes}
-      onIgnoreLinePrefixesChange={setIgnoreLinePrefixes}
-      ignoreTags={ignoreTags}
-      onIgnoreTagsChange={setIgnoreTags}
-      defaultStyleId={defaultStyleId}
-      onDefaultStyleIdChange={setDefaultStyleId}
-      autoCenterBubble={typerAutoCenterBubble}
-      onAutoCenterBubbleChange={setTyperAutoCenterBubble}
-      sizeStep={typerSizeStep}
-      onSizeStepChange={setTyperSizeStep}
-      index={typerIndex}
-      onIndexChange={setTyperIndex}
-      armed={typerArmed}
-      onArmedChange={(armed) => { setTyperArmed(armed); if (armed) setActiveTool(multiBubbleMode ? 'marquee-rect' : 'text'); }}
-      fontFamilies={allFontFamilies}
-      multiBubbleMode={multiBubbleMode}
-      onMultiBubbleModeChange={setMultiBubbleMode}
-      queuedBubbleCount={multiBubbleRects.length}
-      onAddBubbleRect={handleAddBubbleRect}
-      onPlaceAllBubbles={handlePlaceAllBubbles}
-    />
+  // Built once and reused for both the docked-tab render and the floating window — the one place a
+  // copy-pasted prop list could quietly drift between the two.
+  const typerPanelProps = {
+    script: typerScript,
+    onScriptChange: setTyperScript,
+    styles: typerStyles,
+    onStylesChange: setTyperStyles,
+    folders: typerFolders,
+    onFoldersChange: setTyperFolders,
+    ignoreLinePrefixes,
+    onIgnoreLinePrefixesChange: setIgnoreLinePrefixes,
+    ignoreTags,
+    onIgnoreTagsChange: setIgnoreTags,
+    defaultStyleId,
+    onDefaultStyleIdChange: setDefaultStyleId,
+    autoCenterBubble: typerAutoCenterBubble,
+    onAutoCenterBubbleChange: setTyperAutoCenterBubble,
+    sizeStep: typerSizeStep,
+    onSizeStepChange: setTyperSizeStep,
+    index: typerIndex,
+    onIndexChange: setTyperIndex,
+    armed: typerArmed,
+    onArmedChange: (armed: boolean) => { setTyperArmed(armed); if (armed) setActiveTool(multiBubbleMode ? 'marquee-rect' : 'text'); },
+    fontFamilies: allFontFamilies,
+    multiBubbleMode,
+    onMultiBubbleModeChange: setMultiBubbleMode,
+    queuedBubbleCount: multiBubbleRects.length,
+    onAddBubbleRect: handleAddBubbleRect,
+    onPlaceAllBubbles: handlePlaceAllBubbles,
+  };
+
+  const typerPanel = typerFloating ? (
+    <div className="h-full flex flex-col items-center justify-center gap-3 p-4 text-center">
+      <p className="text-micro text-ink-faint">TypeR is floating.</p>
+      <button
+        type="button"
+        onClick={() => setTyperFloating(false)}
+        className="h-8 px-3 rounded-control text-ui font-medium border border-hairline bg-ink/5 text-ink hover:bg-ink/10 transition-colors"
+      >
+        Dock it back
+      </button>
+    </div>
+  ) : (
+    <TyperPanel {...typerPanelProps} onPopOut={() => setTyperFloating(true)} />
   );
 
   const translationPanel = (
@@ -1311,6 +1370,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     fit: () => setFitSignal(s => s + 1),
     toggleDock: () => setRightOpen(v => !v),
     addLayer: handleAddLayer,
+    addBlankLayer: handleAddBlankLayer,
     duplicateLayer: () => activeLayerId && handleDuplicateLayer(activeLayerId),
     // Delete removes the whole selection, not just the primary layer.
     deleteLayer: () => handleDeleteLayers(selectedLayerIds),
@@ -1340,6 +1400,8 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     increaseTextSize: () => handleTextSizeStep(1),
     decreaseTextSize: () => handleTextSizeStep(-1),
     hasActiveTextLayer: activeLayer?.type === 'text',
+    typerFloating,
+    toggleTyperFloating: () => setTyperFloating(v => !v),
     panelTabs: allTabs.map(t => ({ id: t.id, label: t.label })),
     showPanel: (id) => {
       if (id === 'pages') { setLeftOpen(true); return; }
@@ -1633,6 +1695,14 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
         onChange={(newPages) => onPagesChange?.(newPages)}
         onCreateWhitedPatchLayer={handleCreateWhitedPatchLayer}
       />
+      {typerFloating && (
+        <TyperFloatingWindow
+          pos={typerFloatPos ?? { x: window.innerWidth - 340, y: 96 }}
+          onPosChange={setTyperFloatPos}
+          onDock={() => setTyperFloating(false)}
+          typerProps={typerPanelProps}
+        />
+      )}
     </div>
   );
 }

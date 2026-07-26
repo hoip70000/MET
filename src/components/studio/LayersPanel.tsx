@@ -34,6 +34,8 @@ interface LayersPanelProps {
   onOpacityChange: (id: string, opacity: number) => void;
   onBlendChange: (id: string, blendMode: StudioLayer['blendMode']) => void;
   onAdd: () => void;
+  /** Alt-click on the Add-layer button — a truly empty layer, no background copy. */
+  onAddBlank: () => void;
   onAddAdjustment: () => void;
   onDuplicate: (id: string) => void;
   onDelete: (id: string) => void;
@@ -80,7 +82,7 @@ interface LayersPanelProps {
 
 export function LayersPanel({
   layers, activeLayerId, selectedLayerIds, onSelect, onToggleVisible, onToggleLocked,
-  onOpacityChange, onBlendChange, onAdd, onAddAdjustment, onDuplicate, onDelete, onDeleteMany, onRename, onMove,
+  onOpacityChange, onBlendChange, onAdd, onAddBlank, onAddAdjustment, onDuplicate, onDelete, onDeleteMany, onRename, onMove,
   onGroup, onUngroup, onToggleCollapsed, onToggleClipped, onToggleMask, onToggleMaskEnabled, onSelectMask,
   activeMaskLayerId, onReparent, onOpenSettings, expandedLayerId, onToggleExpanded,
   panelCollapsed, onTogglePanelCollapsed,
@@ -241,7 +243,13 @@ export function LayersPanel({
           <IconButton size="sm" aria-label="Add adjustment layer" title="Add adjustment layer" onClick={onAddAdjustment} className="!bg-transparent">
             <SlidersHorizontal size={13} />
           </IconButton>
-          <IconButton size="sm" aria-label="Add layer" title="Add raster layer" onClick={onAdd} className="!bg-transparent">
+          <IconButton
+            size="sm"
+            aria-label="Add layer"
+            title="Add raster layer (Alt-click for a blank layer, no background copy)"
+            onClick={(e) => { if (e.altKey) onAddBlank(); else onAdd(); }}
+            className="!bg-transparent"
+          >
             <Plus size={14} />
           </IconButton>
           {onTogglePanelCollapsed && (

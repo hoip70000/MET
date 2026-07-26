@@ -3,13 +3,7 @@ import type { AdjustmentLayerData, TextGradient, TextLayerData } from '../compon
 import { normalizeRuns, resolveRunStyle } from '../components/studio/textRuns';
 import type { ExportSnapshot } from '../components/studio/StudioCanvas';
 import type { SerializedStudioLayer } from './studioProjectStore';
-
-function hexToRgb(hex: string): { r: number; g: number; b: number } {
-  const clean = hex.replace('#', '');
-  const full = clean.length === 3 ? clean.split('').map(c => c + c).join('') : clean.padEnd(6, '0');
-  const num = parseInt(full, 16);
-  return { r: (num >> 16) & 255, g: (num >> 8) & 255, b: num & 255 };
-}
+import { hexToRgb } from './color';
 
 /**
  * Our angle is degrees clockwise from left-to-right in screen coords (y grows down), so 90 means
@@ -142,6 +136,39 @@ function psdAdjustment(data: AdjustmentLayerData): PsdLayer['adjustment'] {
           highlightOutput: data.levels.outWhite,
           midtoneInput: data.levels.gamma,
         },
+      };
+    case 'curves':
+      // ag-psd's CurvesAdjustmentChannel is exactly {input,output}[] — a direct passthrough.
+      return { type: 'curves', rgb: data.curves.rgb };
+    case 'exposure':
+      return { type: 'exposure', exposure: data.exposure, offset: data.exposureOffset, gamma: data.exposureGamma };
+    case 'vibrance':
+      return { type: 'vibrance', vibrance: data.vibrance };
+    case 'color-balance':
+      // ag-psd's ColorBalanceValues is exactly {cyanRed,magentaGreen,yellowBlue} — direct passthrough.
+      return {
+        type: 'color balance',
+        shadows: data.colorBalance.shadows,
+        midtones: data.colorBalance.midtones,
+        highlights: data.colorBalance.highlights,
+        preserveLuminosity: data.colorBalance.preserveLuminosity,
+      };
+    case 'posterize':
+      return { type: 'posterize', levels: data.posterizeLevels };
+    case 'threshold':
+      return { type: 'threshold', level: data.threshold };
+    case 'gradient-map':
+      // Same location:0..1 convention already verified for LayerEffectGradientOverlay above (both
+      // use ag-psd's one shared ColorStop type) — a real write/read round-trip is still worth doing
+      // for GradientMapAdjustment specifically once this ships, same diligence the text-gradient
+      // work above already applied.
+      return {
+        type: 'gradient map',
+        gradientType: 'solid',
+        colorStops: [
+          { color: hexToRgb(data.gradientMap.from), location: 0, midpoint: 0.5 },
+          { color: hexToRgb(data.gradientMap.to), location: 1, midpoint: 0.5 },
+        ],
       };
   }
 }
