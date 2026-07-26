@@ -49,6 +49,8 @@ import { FontsPanel } from './FontsPanel';
 import { BrushesPanel } from './BrushesPanel';
 import type { BrushPreset } from '../../lib/brushStore';
 import { AdjustmentPanel } from './AdjustmentPanel';
+import { FilterDialog } from './filters/FilterDialog';
+import { FILTER_DIALOG_CONFIGS, type FilterConfig } from './filters/filterDialogConfigs';
 import {
   loadChapterStudioData, saveChapterStudioData, pushVersionSnapshot, STUDIO_SCHEMA_VERSION,
   type ChapterStudioData, type SerializedStudioLayer,
@@ -220,6 +222,9 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
   const [aboutOpen, setAboutOpen] = useState(false);
   const [toolRailVisible, setToolRailVisible] = useState(true);
   const [optionsBarVisible, setOptionsBarVisible] = useState(true);
+  const [activeFilterDialog, setActiveFilterDialog] = useState<{
+    config: FilterConfig; canvas: HTMLCanvasElement; before: ImageData; layerId: string;
+  } | null>(null);
 
   useEffect(() => {
     function onFullscreenChange() { setIsFullscreen(document.fullscreenElement === studioRootRef.current); }
@@ -1429,6 +1434,33 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
   const handleFillActivePath = () => bakeActivePath(fillPathOntoCanvas);
   const canBakePath = activeLayer?.type === 'path' && !!topmostRasterLayer();
 
+  /** Image > Apply Filter's bake target: the active layer if it's already raster, otherwise the
+   *  same "topmost existing raster layer" fallback Stroke/Fill Path and the paint-tool
+   *  auto-raster-select effect both already use. */
+  function filterTargetLayer(): StudioLayer | null {
+    return activeLayer?.type === 'clean-patch' ? activeLayer : topmostRasterLayer();
+  }
+
+  function handleOpenFilterDialog(kind: string) {
+    const config = FILTER_DIALOG_CONFIGS[kind];
+    const target = filterTargetLayer();
+    if (!config || !target) {
+      swalToast({ icon: 'info', title: 'Add or select a raster layer first' });
+      return;
+    }
+    const canvas = canvasRef.current?.getPaintCanvas(target.id);
+    const ctx = canvas?.getContext('2d');
+    if (!canvas || !ctx) return;
+    const before = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    setActiveFilterDialog({ config, canvas, before, layerId: target.id });
+  }
+
+  function handleFilterDialogApply() {
+    if (!activeFilterDialog) return;
+    handlePaintStrokeEnd(activeFilterDialog.layerId, activeFilterDialog.before);
+    setActiveFilterDialog(null);
+  }
+
   function handleMakeSelectionFromPath() {
     if (activeLayer?.type !== 'path' || !activeLayer.path) return;
     setSelection(pathToSelection(activeLayer.path));
@@ -1716,8 +1748,8 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     textSetLtr: handleSetTextLtr,
     openFontPanel: handleOpenFontPanel,
     addAdjustmentLayerKind: handleAddAdjustmentLayerOfKind,
-    filtersEnabled: false,
-    applyFilter: () => {},
+    filtersEnabled: true,
+    applyFilter: handleOpenFilterDialog,
     liquifyTool: switchToLiquify,
     contentAwareFillTool: switchToContentAwareFill,
     rotateCanvas: (dir) => { void handleRotateCanvas(dir); },
@@ -2022,6 +2054,16 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
           <p className="text-micro text-ink-faint">A browser-based Studio for cleaning scans, laying out dialogue, and exporting finished pages.</p>
         </div>
       </Modal>
+      {activeFilterDialog && (
+        <FilterDialog
+          config={activeFilterDialog.config}
+          canvas={activeFilterDialog.canvas}
+          before={activeFilterDialog.before}
+          onRedraw={() => canvasRef.current?.redrawLayer(activeFilterDialog.layerId)}
+          onCancel={() => setActiveFilterDialog(null)}
+          onApply={handleFilterDialogApply}
+        />
+      )}
     </div>
   );
 }
