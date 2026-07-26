@@ -23,11 +23,13 @@ interface TextPanelProps {
   selection?: TextSelection | null;
   /** Wrapped-line index selected on canvas (click a line while the layer is selected, not editing). */
   selectedLineIndex?: number | null;
+  /** Set when hosted inside the right-column panel stack, whose own header already shows the name. */
+  hideTitle?: boolean;
 }
 
 const FONT_WEIGHTS = [100, 200, 300, 400, 500, 600, 700, 800, 900];
 
-export function TextPanel({ layer, onUpdate, onCenter, fontFamilies = FONT_FAMILIES, selection = null, selectedLineIndex = null }: TextPanelProps) {
+export function TextPanel({ layer, onUpdate, onCenter, fontFamilies = FONT_FAMILIES, selection = null, selectedLineIndex = null, hideTitle }: TextPanelProps) {
   const [styles, setStyles] = useState<TextStyle[]>([]);
   const [openGroups, setOpenGroups] = useState<Record<TextStyleKind, boolean>>({ character: true, paragraph: false });
 
@@ -124,6 +126,7 @@ export function TextPanel({ layer, onUpdate, onCenter, fontFamilies = FONT_FAMIL
   return (
     <StudioPanel
       title="Text"
+      hideTitle={hideTitle}
       actions={
         <IconButton size="sm" aria-label="Center horizontally" title="Center in bubble" onClick={() => onCenter(layer.id)} className="!bg-transparent">
           <AlignCenterHorizontal size={14} />

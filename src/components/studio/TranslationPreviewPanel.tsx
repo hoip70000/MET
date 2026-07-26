@@ -20,6 +20,8 @@ interface TranslationPreviewPanelProps {
   activePageId: string | null;
   onJumpToBubble: (pageId: string, layerId: string) => void;
   onUpdateText: (pageId: string, layerId: string, patch: { content?: string; status?: TranslationStatus; comment?: string }) => void;
+  /** Set when hosted inside the right-column panel stack, whose own header already shows the name. */
+  hideTitle?: boolean;
 }
 
 const STATUS_LABEL: Record<TranslationStatus, string> = { draft: 'Draft', translated: 'Translated', reviewed: 'Reviewed' };
@@ -29,7 +31,7 @@ const STATUS_CLASS: Record<TranslationStatus, string> = {
   reviewed: 'bg-success/15 text-success',
 };
 
-export function TranslationPreviewPanel({ pages, layersByPage, activePageId, onJumpToBubble, onUpdateText }: TranslationPreviewPanelProps) {
+export function TranslationPreviewPanel({ pages, layersByPage, activePageId, onJumpToBubble, onUpdateText, hideTitle }: TranslationPreviewPanelProps) {
   const [query, setQuery] = useState('');
   const [replaceWith, setReplaceWith] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -73,6 +75,7 @@ export function TranslationPreviewPanel({ pages, layersByPage, activePageId, onJ
   return (
     <StudioPanel
       title="Translation Preview"
+      hideTitle={hideTitle}
       bare
       actions={<span className="text-micro text-ink-faint pr-1">{rows.length} dialogue{rows.length !== 1 ? 's' : ''}</span>}
     >

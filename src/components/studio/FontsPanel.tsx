@@ -9,6 +9,8 @@ import { StudioPanel } from './StudioPanel';
 
 interface FontsPanelProps {
   onFamiliesChange: (families: string[]) => void;
+  /** Set when hosted inside the right-column panel stack, whose own header already shows the name. */
+  hideTitle?: boolean;
 }
 
 /** Font manager: install fonts from uploaded files (FontFace API + opentype.js metadata
@@ -16,7 +18,7 @@ interface FontsPanelProps {
  *  onFamiliesChange. Google Fonts integration is optional per SPEC and out of scope here —
  *  this app must keep working fully offline, and a Google Fonts picker needs network access
  *  by definition. */
-export function FontsPanel({ onFamiliesChange }: FontsPanelProps) {
+export function FontsPanel({ onFamiliesChange, hideTitle }: FontsPanelProps) {
   const [fonts, setFonts] = useState<StoredFont[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -75,7 +77,7 @@ export function FontsPanel({ onFamiliesChange }: FontsPanelProps) {
 
   if (!loaded) {
     return (
-      <StudioPanel title="Fonts" bodyClassName="!gap-2">
+      <StudioPanel title="Fonts" hideTitle={hideTitle} bodyClassName="!gap-2">
         <div className="space-y-1.5 p-1">
           {Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-7" />)}
         </div>
@@ -86,6 +88,7 @@ export function FontsPanel({ onFamiliesChange }: FontsPanelProps) {
   return (
     <StudioPanel
       title="Fonts"
+      hideTitle={hideTitle}
       bodyClassName="!gap-2"
       actions={
         <>

@@ -4,12 +4,18 @@ import { cn } from '../../ui/cn';
 import { StudioPanel } from '../StudioPanel';
 import { useHistory } from './HistoryContext';
 
-export function HistoryPanel() {
+interface HistoryPanelProps {
+  /** Set when hosted inside the right-column panel stack, whose own header already shows the name. */
+  hideTitle?: boolean;
+}
+
+export function HistoryPanel({ hideTitle }: HistoryPanelProps = {}) {
   const { entries, cursor, undo, redo, jumpTo, canUndo, canRedo } = useHistory();
 
   return (
     <StudioPanel
       title="History"
+      hideTitle={hideTitle}
       bare
       bodyClassName="py-1.5 px-1.5 flex flex-col gap-0.5"
       actions={

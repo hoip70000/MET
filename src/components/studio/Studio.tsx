@@ -7,7 +7,7 @@ import { StudioPagesPanel } from './StudioPagesPanel';
 import { PagesManagePanel } from './PagesManagePanel';
 import { computeWhitedDiffMask } from './whitedDiff';
 import { ToolRail } from './ToolRail';
-import { RightDock } from './RightDock';
+import { PanelStack, type PanelStackEntry } from './dock/PanelStack';
 import { LayersPanel } from './LayersPanel';
 import { TextPanel } from './TextPanel';
 import { TyperPanel } from './TyperPanel';
@@ -17,7 +17,7 @@ import { ColorPanel } from './color/ColorPanel';
 import { HistoryProvider, useHistory } from './history/HistoryContext';
 import { HistoryPanel } from './history/HistoryPanel';
 import { useKeyboardUndo } from './history/useKeyboardUndo';
-import { DockProvider, useDock } from './dock/DockContext';
+import { PanelLayoutProvider, usePanelLayout } from './dock/PanelLayoutContext';
 import {
   flattenTree, findLayer, updateLayer, mapTree, removeLayers, insertAfter, moveWithinParent, cloneSubtree,
   collectSubtree, getParent, getSiblings, groupLayers, ungroup, reparent, canBeClipBase,
@@ -75,9 +75,9 @@ export function Studio(props: StudioProps) {
   return (
     <ColorProvider>
       <HistoryProvider>
-        <DockProvider storageKey={props.chapterId}>
+        <PanelLayoutProvider storageKey={props.chapterId}>
           <StudioInner {...props} />
-        </DockProvider>
+        </PanelLayoutProvider>
       </HistoryProvider>
     </ColorProvider>
   );
@@ -88,7 +88,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
   const { foreground, background, setForeground, swap: swapColors, reset: resetColors } = useColor();
   const history = useHistory();
   useKeyboardUndo();
-  const dock = useDock();
+  const panelLayout = usePanelLayout();
   const [brushSize, setBrushSize] = useState(24);
   const [brushHardness, setBrushHardness] = useState(0.8);
   const [brushOpacity, setBrushOpacity] = useState(1);
@@ -290,11 +290,6 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
   const [rightOpen, setRightOpen] = useState(true);
   const leftSidebarRef = useRef<HTMLDivElement>(null);
   const rightSidebarRef = useRef<HTMLDivElement>(null);
-  // Color and Layers are pinned, always-visible sections of the right column — collapsing either
-  // via its chevron only shrinks it to a slim header, never fully hides it (aside from
-  // rightOpen/Window > Hide All Panels, which hides the whole column).
-  const [colorPanelCollapsed, setColorPanelCollapsed] = useState(false);
-  const [layersPanelCollapsed, setLayersPanelCollapsed] = useState(false);
 
   function toggleLeftSidebar() {
     setLeftOpen(v => {
@@ -352,7 +347,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
   // needs yet. State lives here (not a new Context): only Studio.tsx and TyperFloatingWindow need
   // it, and typerIndex/typerArmed/etc. above stay exactly where they are regardless of floating vs
   // docked — StudioCanvas reads them for canvas-click placement either way. Persisted the same
-  // debounced-localStorage way DockContext persists the active dock tab; Studio.tsx fully unmounts
+  // debounced-localStorage way PanelLayoutContext persists panel order/collapse; Studio.tsx fully unmounts
   // on chapter switch (a fresh mount is a fresh chapter), so a lazy useState initializer is enough —
   // no re-seed-on-chapterId-change effect needed.
   const [typerFloating, setTyperFloating] = useState(() => {
@@ -812,7 +807,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     const layer = createAdjustmentLayer(kind);
     updateLayers(current => [...current, layer], 'Add Adjustment Layer');
     setActiveLayerId(layer.id);
-    dock.selectTab('adjustment');
+    panelLayout.reveal('adjustment');
   }
 
   /** Edit > Copy: clones the active layer (and its subtree, if it's a group) under fresh ids with
@@ -854,7 +849,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
 
   function handleOpenFindReplace() {
     setRightOpen(true);
-    dock.selectTab('translation');
+    panelLayout.reveal('translation');
   }
 
   function handleSaveProjectNow() {
@@ -1038,8 +1033,8 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
    *  settings button, not plain selection. No-ops for layer types with no dedicated panel. */
   function openLayerSettings(id: string) {
     const type = findLayer(layers, id)?.type;
-    if (type === 'text') dock.selectTab('text');
-    if (type === 'adjustment') dock.selectTab('adjustment');
+    if (type === 'text') panelLayout.reveal('text');
+    if (type === 'adjustment') panelLayout.reveal('adjustment');
     setActiveMaskLayerId(null);
   }
 
@@ -1272,7 +1267,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     updateLayers(current => [...current, layer], 'Add Text Layer');
     setActiveLayerId(layer.id);
     setActiveTool('select');
-    dock.selectTab('text');
+    panelLayout.reveal('text');
   }
 
   function handleUpdateTextLayer(id: string, patch: Partial<TextLayerData>) {
@@ -1326,7 +1321,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
   function jumpToBubble(pageId: string, layerId: string) {
     setActivePageId(pageId);
     setActiveLayerId(layerId);
-    dock.selectTab('text');
+    panelLayout.reveal('text');
   }
 
   function handleCenterTextLayer(id: string) {
@@ -1395,17 +1390,17 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
 
   function handleOpenFontPanel() {
     setRightOpen(true);
-    dock.selectTab('text');
+    panelLayout.reveal('text');
   }
 
   function handleTriggerImportFonts() {
     setRightOpen(true);
-    dock.selectTab('fonts');
+    panelLayout.reveal('fonts');
   }
 
   function handleTriggerImportBrushes() {
     setRightOpen(true);
-    dock.selectTab('brushes');
+    panelLayout.reveal('brushes');
   }
 
   const activeLayer = findLayer(layers, activeLayerId) ?? null;
@@ -1510,8 +1505,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
       activeMaskLayerId={activeMaskLayerId}
       expandedLayerId={expandedLayerId}
       onToggleExpanded={(id) => setExpandedLayerId(current => (current === id ? null : id))}
-      panelCollapsed={layersPanelCollapsed}
-      onTogglePanelCollapsed={() => setLayersPanelCollapsed(v => !v)}
+      hideTitle
     />
   );
 
@@ -1523,11 +1517,12 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
       fontFamilies={allFontFamilies}
       selection={textSelection?.layerId === activeLayer.id ? textSelection : null}
       selectedLineIndex={textLineSelection?.layerId === activeLayer.id ? textLineSelection.lineIndex : null}
+      hideTitle
     />
   ) : null;
 
   const adjustmentPanel = activeLayer?.type === 'adjustment' ? (
-    <AdjustmentPanel layer={activeLayer} onUpdate={handleUpdateAdjustmentLayer} />
+    <AdjustmentPanel layer={activeLayer} onUpdate={handleUpdateAdjustmentLayer} hideTitle />
   ) : null;
 
   const brushesPanel = (
@@ -1535,6 +1530,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
       color={foreground}
       activeBrushId={activeBrushId}
       onSelectBrush={handleSelectBrush}
+      hideTitle
       live={{ size: brushSize, hardness: brushHardness, opacity: brushOpacity, flow: brushFlow,
         spacing, angle: brushAngle, roundness: brushRoundness, scatter, smoothing, pressureSize, pressureOpacity }}
       onLiveChange={(patch) => {
@@ -1553,9 +1549,9 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     />
   );
 
-  const colorPanel = <ColorPanel collapsed={colorPanelCollapsed} onToggleCollapsed={() => setColorPanelCollapsed(v => !v)} />;
-  const historyPanel = <HistoryPanel />;
-  const fontsPanel = <FontsPanel onFamiliesChange={setCustomFontFamilies} />;
+  const colorPanel = <ColorPanel hideTitle />;
+  const historyPanel = <HistoryPanel hideTitle />;
+  const fontsPanel = <FontsPanel onFamiliesChange={setCustomFontFamilies} hideTitle />;
 
   // Built once and reused for both the docked-tab render and the floating window — the one place a
   // copy-pasted prop list could quietly drift between the two.
@@ -1600,7 +1596,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
       </button>
     </div>
   ) : (
-    <TyperPanel {...typerPanelProps} onPopOut={() => setTyperFloating(true)} />
+    <TyperPanel {...typerPanelProps} onPopOut={() => setTyperFloating(true)} hideTitle />
   );
 
   const translationPanel = (
@@ -1610,6 +1606,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
       activePageId={activePageId}
       onJumpToBubble={jumpToBubble}
       onUpdateText={(pageId, layerId, patch) => handleUpdateTextLayerOnPage(pageId, layerId, patch)}
+      hideTitle
     />
   );
 
@@ -1625,10 +1622,31 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     { id: 'layers', label: 'Layers', content: layersPanel },
     { id: 'pages', label: 'Pages', content: null },
   ];
-  // Color and Layers are pinned sections of the right column (see toolsSidebar below), not part of
-  // the swappable strip — otherwise switching to any other tab would hide whichever of the two was
-  // active, which is exactly the "Layers panel disappears" bug this restructure exists to remove.
-  const toolTabs = allTabs.filter(t => t.id !== 'pages' && t.id !== 'color' && t.id !== 'layers');
+  // Every real stackable panel except Pages, which is the separate left-side sidebar the Window
+  // menu also lists — its visibility is `leftOpen`, not part of PanelLayoutContext's stack at all.
+  const panelStackEntries: PanelStackEntry[] = allTabs
+    .filter(t => t.id !== 'pages')
+    .map(t => ({
+      id: t.id,
+      label: t.label,
+      content: t.content,
+      ...(t.id === 'layers' ? {
+        onMenu: () => swal({
+          title: 'Layers',
+          input: 'select',
+          inputOptions: { add: 'New Layer', addBlank: 'New Blank Layer', flatten: 'Flatten Image', mergeVisible: 'Merge Visible' },
+          inputPlaceholder: 'Choose an action',
+          showCancelButton: true,
+          confirmButtonText: 'Go',
+        }).then((r) => {
+          if (!r.isConfirmed) return;
+          if (r.value === 'add') handleAddLayer();
+          else if (r.value === 'addBlank') handleAddBlankLayer();
+          else if (r.value === 'flatten') void handleFlattenImage();
+          else if (r.value === 'mergeVisible') void handleMergeVisible();
+        }),
+      } : {}),
+    }));
   const pagesTabHorizontal = <StudioPagesPanel pages={pages} activePageId={activePageId} onSelect={setActivePageId} orientation="horizontal" onManagePages={() => setPagesManagerOpen(true)} />;
 
   const menus = buildMenus({
@@ -1707,26 +1725,25 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     toggleToolRail,
     optionsBarVisible,
     toggleOptionsBar,
-    resetLayoutEnabled: false,
-    resetPanelLayout: () => {},
+    resetLayoutEnabled: true,
+    resetPanelLayout: panelLayout.resetLayout,
     aboutOpen: () => setAboutOpen(true),
     triggerImportFonts: handleTriggerImportFonts,
     triggerImportBrushes: handleTriggerImportBrushes,
     typerFloating,
     toggleTyperFloating: () => setTyperFloating(v => !v),
     panelTabs: allTabs.map(t => ({ id: t.id, label: t.label })),
+    // A real on/off toggle (not "always turn on") — Window > Brushes Panel needs to make the panel
+    // disappear on a second click, not just re-select an already-visible one.
     showPanel: (id) => {
-      if (id === 'pages') { setLeftOpen(true); return; }
-      setRightOpen(true);
-      if (id === 'color') { setColorPanelCollapsed(false); return; }
-      if (id === 'layers') { setLayersPanelCollapsed(false); return; }
-      dock.selectTab(id);
+      if (id === 'pages') { setLeftOpen(v => !v); return; }
+      const next = !panelLayout.isVisible(id);
+      if (next) setRightOpen(true);
+      panelLayout.setVisible(id, next);
     },
     isPanelVisible: (id) => {
       if (id === 'pages') return leftOpen;
-      if (id === 'color') return rightOpen && !colorPanelCollapsed;
-      if (id === 'layers') return rightOpen && !layersPanelCollapsed;
-      return rightOpen && dock.activeTab === id;
+      return rightOpen && panelLayout.isVisible(id);
     },
     showShortcutsHelp: () => swal({
       title: 'Keyboard Shortcuts',
@@ -1832,25 +1849,14 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     />
   );
 
-  // Color (top) and Layers (bottom) are pinned, always-visible sections of the right column;
-  // collapsing one via its own chevron (rendered in its own StudioPanel header — see ColorPanel's
-  // and LayersPanel's `collapsed`/`onToggleCollapsed` props) shrinks its wrapper div to just that
-  // header height and hands the freed space to whatever's still expanded, including the swappable
-  // tab strip between them (Text/Adjustment/TypeR/Translation/Brushes/Fonts/History) — which keeps
-  // working exactly as it did as a single-region dock, just relocated.
+  // Every real panel now stacks vertically in one column (PanelStack), each independently visible/
+  // collapsed/reordered/maximized via PanelLayoutContext — replacing the old fixed 3-block layout
+  // (Color pinned top, one swappable tab strip, Layers pinned bottom).
   const toolsSidebar = (
     <div className="h-full flex">
       {toolRailVisible && <ToolRail activeTool={activeTool} onToolChange={setActiveTool} orientation="vertical" />}
-      <div className="w-64 sm:w-72 h-full flex flex-col min-h-0">
-        <div className={cn('shrink-0 min-h-0 overflow-hidden border-b border-hairline', colorPanelCollapsed ? 'h-10' : 'h-[45%]')}>
-          {colorPanel}
-        </div>
-        <div className="flex-1 min-h-0 border-y border-hairline">
-          <RightDock activeTab={dock.activeTab ?? undefined} onTabChange={dock.selectTab} tabs={toolTabs} className="!border-l-0" />
-        </div>
-        <div className={cn('min-h-0 overflow-hidden', layersPanelCollapsed ? 'h-10 shrink-0' : 'flex-1')}>
-          {layersPanel}
-        </div>
+      <div className="w-64 sm:w-72 h-full min-h-0 border-l border-hairline">
+        <PanelStack panels={panelStackEntries} />
       </div>
     </div>
   );
@@ -1980,20 +1986,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
             <div className="flex-1 min-h-0 flex flex-col-reverse">
               {toolRailVisible && <ToolRail activeTool={activeTool} onToolChange={setActiveTool} orientation="horizontal" />}
               <div className="flex-1 min-h-0 flex flex-col border-x border-hairline">
-                <div className={cn('shrink-0 min-h-0 overflow-hidden border-b border-hairline', colorPanelCollapsed ? 'h-10' : 'h-[45%]')}>
-                  {colorPanel}
-                </div>
-                <div className="flex-1 min-h-0 border-y border-hairline">
-                  <RightDock
-                    activeTab={dock.activeTab ?? undefined}
-                    onTabChange={dock.selectTab}
-                    className="!w-full !h-full !border-l-0"
-                    tabs={toolTabs}
-                  />
-                </div>
-                <div className={cn('min-h-0 overflow-hidden', layersPanelCollapsed ? 'h-10 shrink-0' : 'flex-1')}>
-                  {layersPanel}
-                </div>
+                <PanelStack panels={panelStackEntries} />
               </div>
             </div>
           </div>

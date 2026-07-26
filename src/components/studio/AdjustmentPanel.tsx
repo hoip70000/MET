@@ -5,6 +5,8 @@ import { CurvesEditor } from './CurvesEditor';
 interface AdjustmentPanelProps {
   layer: StudioLayer;
   onUpdate: (id: string, patch: Partial<AdjustmentLayerData>) => void;
+  /** Set when hosted inside the right-column panel stack, whose own header already shows the name. */
+  hideTitle?: boolean;
 }
 
 const KIND_LABELS = ADJUSTMENT_KIND_LABEL;
@@ -29,7 +31,7 @@ function Slider({ label, min, max, step = 1, value, onChange }: {
   );
 }
 
-export function AdjustmentPanel({ layer, onUpdate }: AdjustmentPanelProps) {
+export function AdjustmentPanel({ layer, onUpdate, hideTitle }: AdjustmentPanelProps) {
   const data = layer.adjustment;
   if (!data) return null;
 
@@ -37,7 +39,7 @@ export function AdjustmentPanel({ layer, onUpdate }: AdjustmentPanelProps) {
   const setLevels = (patch: Partial<AdjustmentLayerData['levels']>) => set({ levels: { ...data.levels, ...patch } });
 
   return (
-    <StudioPanel title="Adjustment">
+    <StudioPanel title="Adjustment" hideTitle={hideTitle}>
         <p className="text-micro text-ink-faint/70 leading-snug">
           Applies to every layer below this one. Move it up or down the stack to change what it affects,
           or lower its opacity to ease it off.

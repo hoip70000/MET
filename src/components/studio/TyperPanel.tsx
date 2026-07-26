@@ -45,6 +45,8 @@ export interface TyperPanelProps {
    *  when this instance is already the floating one, or in any standalone/test usage — the button
    *  simply doesn't render without it. */
   onPopOut?: () => void;
+  /** Set when hosted inside the right-column panel stack, whose own header already shows the name. */
+  hideTitle?: boolean;
 }
 
 /** newline-or-semicolon-separated textarea value, same convention as a style's Prefixes field. */
@@ -60,7 +62,7 @@ export function TyperPanel({
   index, onIndexChange, armed, onArmedChange,
   fontFamilies = FONT_FAMILIES,
   multiBubbleMode, onMultiBubbleModeChange, queuedBubbleCount, onAddBubbleRect, onPlaceAllBubbles,
-  onPopOut,
+  onPopOut, hideTitle,
 }: TyperPanelProps) {
   const [editingStyleId, setEditingStyleId] = useState<string | null>(null);
   const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
@@ -313,6 +315,7 @@ export function TyperPanel({
   return (
     <StudioPanel
       title="TypeR"
+      hideTitle={hideTitle}
       actions={
         <>
           <IconButton size="sm" aria-label="Import TypeR JSON" title="Import TypeR JSON" onClick={() => importInputRef.current?.click()} className="!bg-transparent">
