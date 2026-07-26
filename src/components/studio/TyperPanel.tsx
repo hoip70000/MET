@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Target, RotateCcw, Plus, Trash2, Copy, Download, Upload, Layers as LayersIcon, Pencil, Check, FolderPlus, Wand2, Play } from 'lucide-react';
+import { Target, RotateCcw, Plus, Trash2, Copy, Download, Upload, Layers as LayersIcon, Pencil, Check, FolderPlus, Wand2, Play, Maximize2 } from 'lucide-react';
 import { Textarea, IconButton } from '../ui';
 import { cn } from '../ui/cn';
 import { swal, swalToast } from '../../lib/swalTheme';
@@ -9,7 +9,7 @@ import {
   buildFolderTree, flattenFolderTree, FONT_FAMILIES, type TyperStyle, type TyperFolder,
 } from './studioTypes';
 
-interface TyperPanelProps {
+export interface TyperPanelProps {
   script: string;
   onScriptChange: (script: string) => void;
   styles: TyperStyle[];
@@ -41,6 +41,10 @@ interface TyperPanelProps {
   queuedBubbleCount: number;
   onAddBubbleRect: () => void;
   onPlaceAllBubbles: () => void;
+  /** Pops this panel out into its own floating window (Studio.tsx's TyperFloatingWindow). Omitted
+   *  when this instance is already the floating one, or in any standalone/test usage — the button
+   *  simply doesn't render without it. */
+  onPopOut?: () => void;
 }
 
 /** newline-or-semicolon-separated textarea value, same convention as a style's Prefixes field. */
@@ -56,6 +60,7 @@ export function TyperPanel({
   index, onIndexChange, armed, onArmedChange,
   fontFamilies = FONT_FAMILIES,
   multiBubbleMode, onMultiBubbleModeChange, queuedBubbleCount, onAddBubbleRect, onPlaceAllBubbles,
+  onPopOut,
 }: TyperPanelProps) {
   const [editingStyleId, setEditingStyleId] = useState<string | null>(null);
   const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
@@ -326,6 +331,11 @@ export function TyperPanel({
           >
             <RotateCcw size={13} />
           </IconButton>
+          {onPopOut && (
+            <IconButton size="sm" aria-label="Float TypeR" title="Pop out into a floating window" onClick={onPopOut} className="!bg-transparent">
+              <Maximize2 size={13} />
+            </IconButton>
+          )}
         </>
       }
     >
