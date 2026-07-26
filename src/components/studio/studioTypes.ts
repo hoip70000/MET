@@ -176,7 +176,28 @@ export const DEFAULT_TEXT_GRADIENT: TextGradient = {
   enabled: false, from: '#ffffff', to: '#000000', angle: 90,
 };
 
-export type AdjustmentKind = 'brightness-contrast' | 'hue-saturation' | 'levels';
+export type AdjustmentKind =
+  | 'brightness-contrast' | 'hue-saturation' | 'levels'
+  | 'curves' | 'exposure' | 'vibrance' | 'color-balance' | 'posterize' | 'threshold' | 'gradient-map';
+
+export const ADJUSTMENT_KIND_LABEL: Record<AdjustmentKind, string> = {
+  'brightness-contrast': 'Brightness/Contrast',
+  'hue-saturation': 'Hue/Saturation',
+  levels: 'Levels',
+  curves: 'Curves',
+  exposure: 'Exposure',
+  vibrance: 'Vibrance',
+  'color-balance': 'Color Balance',
+  posterize: 'Posterize',
+  threshold: 'Threshold',
+  'gradient-map': 'Gradient Map',
+};
+
+/** One curve control point — `input`/`output` are both 0-255. */
+export interface CurvePoint { input: number; output: number; }
+
+/** Cyan-Red / Magenta-Green / Yellow-Blue sliders, each -100..100 — one per Color Balance tonal range. */
+export interface ColorBalanceRange { cyanRed: number; magentaGreen: number; yellowBlue: number; }
 
 /**
  * Non-destructive adjustment applied to **everything below it in its parent** — its position in the
@@ -208,6 +229,29 @@ export interface AdjustmentLayerData {
     outBlack: number; // 0-255
     outWhite: number; // 0-255
   };
+  /** Control points, sorted by `input`, identity (no-op) by default. Edited by CurvesEditor.tsx;
+   *  `adjustments.ts`'s `curveLut` is the single source of truth for what they render to, shared by
+   *  the live filter and the editor's own on-screen preview so the two can't drift. */
+  curves: { rgb: CurvePoint[] };
+  /** ag-psd's ExposureAdjustment field names, reused verbatim so exportPsd needs no renaming. */
+  exposure: number; // -20..20 stops
+  exposureOffset: number; // -0.5..0.5
+  exposureGamma: number; // 0.01..9.99, 1 = identity
+  /** -100..100. Boosts low-saturation pixels more than already-saturated ones. */
+  vibrance: number;
+  colorBalance: {
+    shadows: ColorBalanceRange;
+    midtones: ColorBalanceRange;
+    highlights: ColorBalanceRange;
+    preserveLuminosity: boolean;
+  };
+  /** 2..255 */
+  posterizeLevels: number;
+  /** 0..255 */
+  threshold: number;
+  /** Deliberately 2-stop only, matching this app's one Gradient tool (also foreground->background
+   *  only) — there's no multi-stop gradient editor anywhere in this codebase yet. */
+  gradientMap: { from: string; to: string };
 }
 
 export function createDefaultAdjustmentData(kind: AdjustmentKind = 'brightness-contrast'): AdjustmentLayerData {
@@ -219,6 +263,20 @@ export function createDefaultAdjustmentData(kind: AdjustmentKind = 'brightness-c
     saturation: 0,
     lightness: 0,
     levels: { inBlack: 0, inWhite: 255, gamma: 1, outBlack: 0, outWhite: 255 },
+    curves: { rgb: [{ input: 0, output: 0 }, { input: 255, output: 255 }] },
+    exposure: 0,
+    exposureOffset: 0,
+    exposureGamma: 1,
+    vibrance: 0,
+    colorBalance: {
+      shadows: { cyanRed: 0, magentaGreen: 0, yellowBlue: 0 },
+      midtones: { cyanRed: 0, magentaGreen: 0, yellowBlue: 0 },
+      highlights: { cyanRed: 0, magentaGreen: 0, yellowBlue: 0 },
+      preserveLuminosity: true,
+    },
+    posterizeLevels: 4,
+    threshold: 128,
+    gradientMap: { from: '#000000', to: '#ffffff' },
   };
 }
 
@@ -330,11 +388,10 @@ export function createLayer(type: StudioLayerType, name: string): StudioLayer {
 
 export function createAdjustmentLayer(kind: AdjustmentKind = 'brightness-contrast'): StudioLayer {
   layerCounter += 1;
-  const label = kind === 'brightness-contrast' ? 'Brightness/Contrast' : kind === 'hue-saturation' ? 'Hue/Saturation' : 'Levels';
   return {
     id: `layer-${Date.now()}-${layerCounter}`,
     type: 'adjustment',
-    name: label,
+    name: ADJUSTMENT_KIND_LABEL[kind],
     visible: true,
     locked: false,
     opacity: 1,
