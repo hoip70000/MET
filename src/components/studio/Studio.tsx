@@ -736,6 +736,16 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     canvasRef.current?.seedLayerWithBackground(layer.id);
   }
 
+  /** The explicit "I want a truly empty layer" action, alongside handleAddLayer's default
+   *  background-copy behavior above — reached via Alt-click on the Layers panel's Add button, or
+   *  Layer > New Blank Layer. Deliberately not seeded: getOrCreateCanvasFor hands back a bare
+   *  transparent canvas when nothing writes to it, so simply skipping the seed call is enough. */
+  function handleAddBlankLayer() {
+    const layer = createLayer('clean-patch', `Layer ${flattenTree(layers).length}`);
+    updateLayers(current => [...current, layer], 'Add Blank Layer');
+    setActiveLayerId(layer.id);
+  }
+
   async function handleCreateWhitedPatchLayer(page: Page, whited: ProcessedImage) {
     try {
       const [originalImg, whitedImg] = await Promise.all([
@@ -1191,6 +1201,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
       onOpacityChange={handleOpacityChange}
       onBlendChange={handleBlendChange}
       onAdd={handleAddLayer}
+      onAddBlank={handleAddBlankLayer}
       onAddAdjustment={handleAddAdjustmentLayer}
       onDuplicate={handleDuplicateLayer}
       onDelete={handleDeleteLayer}
@@ -1345,6 +1356,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     fit: () => setFitSignal(s => s + 1),
     toggleDock: () => setRightOpen(v => !v),
     addLayer: handleAddLayer,
+    addBlankLayer: handleAddBlankLayer,
     duplicateLayer: () => activeLayerId && handleDuplicateLayer(activeLayerId),
     // Delete removes the whole selection, not just the primary layer.
     deleteLayer: () => handleDeleteLayers(selectedLayerIds),
