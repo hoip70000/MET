@@ -44,6 +44,8 @@ export interface TeamMember {
   custom_permissions: string[];
   custom_title: string | null;
   notification_prefs: { broadcasts?: boolean; tasks?: boolean; chat?: boolean };
+  is_verified: boolean;
+  privacy_prefs: { hide_status?: boolean; hide_balance?: boolean; hide_active?: boolean };
   profile?: { name: string; avatar: string; email: string } | null;
 }
 
@@ -54,6 +56,14 @@ export async function updateMyNotificationPrefs(teamId: string, prefs: { broadca
   const userId = userData.user?.id;
   if (!userId) return 'Not signed in.';
   const { error } = await supabase.from('team_members').update({ notification_prefs: prefs }).eq('team_id', teamId).eq('user_id', userId);
+  return error ? error.message : null;
+}
+
+export async function updateMyPrivacyPrefs(teamId: string, prefs: { hide_status: boolean; hide_balance: boolean; hide_active: boolean }): Promise<string | null> {
+  const { data: userData } = await supabase.auth.getUser();
+  const userId = userData.user?.id;
+  if (!userId) return 'Not signed in.';
+  const { error } = await supabase.from('team_members').update({ privacy_prefs: prefs }).eq('team_id', teamId).eq('user_id', userId);
   return error ? error.message : null;
 }
 
@@ -172,16 +182,46 @@ export async function getMyOwnedTeam(): Promise<Team | null> {
 }
 
 export async function getMyMembership(): Promise<(TeamMember & { team: Team }) | null> {
+  const memberships = await listMyMemberships();
+  if (memberships.length === 0) return null;
+  const activeId = await getActiveTeamId();
+  return memberships.find(m => m.team_id === activeId) ?? memberships[0];
+}
+
+/** Every team a user is actively on — `getMyMembership()`'s old `.maybeSingle()` broke as soon
+ *  as someone was active on 2+ teams; this is the real "multiple teams" query, with the
+ *  formerly-single membership resolved via `getActiveTeamId()`/`setActiveTeamId()` below. */
+export async function listMyMemberships(): Promise<(TeamMember & { team: Team })[]> {
   const { data: userData } = await supabase.auth.getUser();
   const userId = userData.user?.id;
-  if (!userId) return null;
+  if (!userId) return [];
   const { data } = await supabase
     .from('team_members')
     .select('*, team:teams(*)')
     .eq('user_id', userId)
-    .eq('status', 'active')
-    .maybeSingle();
-  return (data as (TeamMember & { team: Team })) ?? null;
+    .eq('status', 'active');
+  return (data as (TeamMember & { team: Team })[]) ?? [];
+}
+
+export async function getActiveTeamId(): Promise<string | null> {
+  const { data: userData } = await supabase.auth.getUser();
+  const userId = userData.user?.id;
+  if (!userId) return null;
+  const { data } = await supabase.from('user_active_team').select('team_id').eq('user_id', userId).maybeSingle();
+  return data?.team_id ?? null;
+}
+
+export async function setActiveTeamId(teamId: string): Promise<string | null> {
+  const { data: userData } = await supabase.auth.getUser();
+  const userId = userData.user?.id;
+  if (!userId) return 'Not signed in.';
+  const { error } = await supabase.from('user_active_team').upsert({ user_id: userId, team_id: teamId, updated_at: new Date().toISOString() });
+  return error ? error.message : null;
+}
+
+export async function setMemberVerified(teamId: string, userId: string, verified: boolean): Promise<string | null> {
+  const { error } = await supabase.rpc('set_member_verified', { _team_id: teamId, _user_id: userId, _verified: verified });
+  return error ? error.message : null;
 }
 
 export async function getPendingInvitesForMe(): Promise<(TeamMember & { team: Team })[]> {

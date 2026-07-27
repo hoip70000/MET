@@ -1,13 +1,29 @@
-import { Plus } from 'lucide-react';
+import { Plus, ChevronLeft, ChevronRight } from 'lucide-react';
 import { NAV_TABS, type NavTabId } from '../config/navTabs';
 
 interface SidebarRailProps {
   activeTab: NavTabId;
   onTabChange: (id: NavTabId) => void;
   onCreatePress: () => void;
+  hidden: boolean;
+  onToggleHidden: () => void;
 }
 
-export function SidebarRail({ activeTab, onTabChange, onCreatePress }: SidebarRailProps) {
+export function SidebarRail({ activeTab, onTabChange, onCreatePress, hidden, onToggleHidden }: SidebarRailProps) {
+  if (hidden) {
+    return (
+      <button
+        type="button"
+        onClick={onToggleHidden}
+        aria-label="Show sidebar"
+        title="Show sidebar"
+        className="liquid-glass-bar hidden lg:flex fixed left-0 top-1/2 -translate-y-1/2 z-30 w-5 h-16 rounded-r-xl items-center justify-center border border-l-0 border-hairline text-ink-muted hover:text-ink hover:w-6 transition-all"
+      >
+        <ChevronRight size={14} />
+      </button>
+    );
+  }
+
   return (
     <div className="liquid-glass-bar hidden lg:flex fixed left-0 top-14 sm:top-16 bottom-0 z-30 w-20 flex-col items-center gap-2 py-6 border-r border-hairline">
       <button
@@ -38,6 +54,17 @@ export function SidebarRail({ activeTab, onTabChange, onCreatePress }: SidebarRa
           );
         })}
       </div>
+
+      <div className="flex-1" />
+      <button
+        type="button"
+        onClick={onToggleHidden}
+        aria-label="Hide sidebar"
+        title="Hide sidebar"
+        className="w-8 h-8 rounded-lg flex items-center justify-center text-ink-faint hover:text-ink hover:bg-ink/8 transition-colors"
+      >
+        <ChevronLeft size={16} />
+      </button>
     </div>
   );
 }

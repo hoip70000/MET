@@ -75,3 +75,48 @@ export function requestNotificationPermission(): Promise<NotificationPermission>
   if (Notification.permission !== 'default') return Promise.resolve(Notification.permission);
   return Notification.requestPermission();
 }
+
+// ---------------------------------------------------------------------------
+// User-level notification preferences (categories that aren't team-scoped —
+// team-scoped ones, like chat/tasks/bank, live on team_members.notification_prefs,
+// see src/lib/teams.ts).
+// ---------------------------------------------------------------------------
+
+export type NotifyChannel = 'in_app' | 'in_app_push';
+
+export interface CategoryPref {
+  enabled: boolean;
+  channel: NotifyChannel;
+}
+
+export interface UserNotificationPrefs {
+  broadcasts: CategoryPref;
+  requests: CategoryPref;
+}
+
+const DEFAULT_USER_PREFS: UserNotificationPrefs = {
+  broadcasts: { enabled: true, channel: 'in_app' },
+  requests: { enabled: true, channel: 'in_app' },
+};
+
+export async function getUserNotificationPrefs(): Promise<UserNotificationPrefs> {
+  const { data: userData } = await supabase.auth.getUser();
+  const userId = userData.user?.id;
+  if (!userId) return DEFAULT_USER_PREFS;
+  const { data } = await supabase.from('user_notification_prefs').select('prefs').eq('user_id', userId).maybeSingle();
+  return { ...DEFAULT_USER_PREFS, ...(data?.prefs as Partial<UserNotificationPrefs> | undefined) };
+}
+
+export async function setUserNotificationPrefs(prefs: UserNotificationPrefs): Promise<string | null> {
+  const { data: userData } = await supabase.auth.getUser();
+  const userId = userData.user?.id;
+  if (!userId) return 'Not signed in.';
+  const { error } = await supabase.from('user_notification_prefs').upsert({ user_id: userId, prefs, updated_at: new Date().toISOString() });
+  return error ? error.message : null;
+}
+
+/** Whether a category's current preference calls for a real push (not just the in-app toast/
+ *  badge, which always happens regardless via `subscribeToNotifications`'s Realtime listener). */
+export function shouldDeliverWebPush(pref: CategoryPref | undefined): boolean {
+  return !!pref?.enabled && pref.channel === 'in_app_push';
+}

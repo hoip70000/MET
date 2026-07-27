@@ -71,26 +71,33 @@ export function SplashScreen({ onFinish }: { onFinish: () => void }) {
 
   function finish() {
     setPhase(p => (p === 'leaving' ? p : 'leaving'));
-    setTimeout(onFinish, 950);
+    // Matches the pull-up animation's own duration (see .animate-splash-pull-up) — the
+    // screen has physically left the viewport by the time onFinish unmounts it.
+    setTimeout(onFinish, 260);
   }
 
   return (
-    <div className={`fixed inset-0 z-[999] bg-black overflow-hidden ${phase === 'leaving' ? 'pointer-events-none' : ''}`}>
+    <div
+      className={`fixed inset-0 z-[999] bg-black overflow-hidden ${
+        phase === 'leaving' ? 'pointer-events-none animate-splash-pull-up' : ''
+      }`}
+    >
       <video
         ref={videoRef}
         preload="auto"
         muted
         playsInline
         onEnded={finish}
-        className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-500 ${
-          phase === 'loading' ? 'opacity-0' : phase === 'leaving' ? 'opacity-0 duration-[900ms]' : 'opacity-100'
+        className={`absolute inset-0 w-full h-full object-contain transition-opacity duration-500 ${
+          phase === 'loading' ? 'opacity-0' : 'opacity-100'
         }`}
       >
         <source src={splashVideoWebm} type="video/webm" />
         <source src={splashVideoMp4} type="video/mp4" />
       </video>
 
-      {/* Ember/particle dissolve, fired once the video finishes */}
+      {/* A brief burst of embers rides along with the pull-up for texture, rather than
+          carrying the whole exit transition on its own. */}
       {phase === 'leaving' && (
         <div className="absolute inset-0">
           {particles.map(p => (

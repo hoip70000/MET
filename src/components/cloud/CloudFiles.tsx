@@ -144,6 +144,7 @@ export function CloudFiles({ cc, workspaces, onImportWorkspace, automationEngine
         onCreateFolder={cc.createFolder}
         onDeleteFolder={cc.deleteFolder}
         fileCountFor={(folderId) => cc.files.filter(f => f.folderId === folderId).length}
+        onDownloadFolderZip={(folder) => cc.downloadFolderAsZip(folder.id, folder.name)}
       />
 
       {/* Upload panel */}
@@ -346,6 +347,13 @@ export function CloudFiles({ cc, workspaces, onImportWorkspace, automationEngine
                 </div>
               </GlassCard>
             ))}
+          </div>
+        )}
+        {cc.hasMoreFiles && searchQuery === '' && !activeTagFilter && (
+          <div className="flex justify-center pt-2">
+            <Button variant="secondary" size="sm" onClick={cc.fetchMoreFiles} disabled={cc.isLoadingMoreFiles}>
+              {cc.isLoadingMoreFiles ? 'Loading...' : 'Load More'}
+            </Button>
           </div>
         )}
       </div>
