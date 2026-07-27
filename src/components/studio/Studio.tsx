@@ -300,6 +300,10 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
   const [rightOpen, setRightOpen] = useState(true);
   const leftSidebarRef = useRef<HTMLDivElement>(null);
   const rightSidebarRef = useRef<HTMLDivElement>(null);
+  // Tablet keeps the tool rail itself docked as a permanent, non-overlapping column (see the
+  // tablet-layout block below) — only the wider panel drawer slides over the canvas as an overlay.
+  // Outside-pointerdown-closes-the-drawer logic must not treat a click on the rail as "outside".
+  const rightRailRef = useRef<HTMLDivElement>(null);
 
   function toggleLeftSidebar() {
     setLeftOpen(v => {
@@ -2012,7 +2016,12 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     if (isDesktop) return;
     function onPointerDown(e: PointerEvent) {
       if (leftOpen && leftSidebarRef.current && !leftSidebarRef.current.contains(e.target as Node)) setLeftOpen(false);
-      if (rightOpen && rightSidebarRef.current && !rightSidebarRef.current.contains(e.target as Node)) setRightOpen(false);
+      if (
+        rightOpen &&
+        rightSidebarRef.current &&
+        !rightSidebarRef.current.contains(e.target as Node) &&
+        !rightRailRef.current?.contains(e.target as Node)
+      ) setRightOpen(false);
     }
     window.addEventListener('pointerdown', onPointerDown);
     return () => window.removeEventListener('pointerdown', onPointerDown);
@@ -2179,9 +2188,30 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
             <StudioPagesPanel pages={pages} activePageId={activePageId} onSelect={setActivePageId} orientation="vertical" onManagePages={() => setPagesManagerOpen(true)} />
           </div>
         )}
+        {/* Tablet: the tool rail stays a permanent, non-overlapping column (matching desktop)
+            instead of riding along inside the panel drawer's slide-over overlay — the rail is a
+            handful of narrow icon buttons, not the space-hungry part, so there's no reason for it
+            to ever sit on top of the canvas. Only the wider panel stack (Color/Layers/etc.) still
+            slides over the canvas as a drawer at this breakpoint, anchored flush against the rail
+            (`right-12` = the rail's own w-12) rather than the container's true right edge, so it
+            doesn't overlap the rail either.
+            `pr-12` reserves one more rail-width of empty space past the rail's true edge: a
+            tool-group flyout (`ToolFlyout.tsx`) opens flush to the right of a vertical rail and,
+            by design, is only ever nudged back on-screen *vertically* — never flipped or shifted
+            horizontally, since "which side it opens on" is fixed. That's safe as long as the rail
+            always has room to its right, which it always did before (the rail shared the same
+            overlay as the panel drawer); docking it as its own column right at the container's
+            edge would silently strand every flyout past the viewport's right edge with nothing to
+            recover it. The reserved gap gives it exactly that room back without touching
+            ToolFlyout's own positioning logic. */}
+        {!panelsHidden && layoutMode === 'tablet' && (
+          <div ref={rightRailRef} className="h-full shrink-0 relative z-30 pr-12">
+            {toolRailVisible && <ToolRail activeTool={activeTool} onToolChange={setActiveTool} orientation="vertical" />}
+          </div>
+        )}
         {!panelsHidden && layoutMode === 'tablet' && rightOpen && (
-          <div ref={rightSidebarRef} className="absolute inset-y-0 right-0 z-20 h-full liquid-glass-heavy border-l border-hairline shadow-2xl">
-            {toolsSidebar}
+          <div ref={rightSidebarRef} className="absolute inset-y-0 right-12 z-20 w-64 sm:w-72 h-full liquid-glass-heavy border-l border-hairline shadow-2xl">
+            <PanelStack panels={panelStackEntries} />
           </div>
         )}
 
