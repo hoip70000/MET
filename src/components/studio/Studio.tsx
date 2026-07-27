@@ -277,6 +277,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     onToggleGrid: () => setShowGrid(v => !v),
     onNewLayer: () => handleAddLayer(),
     onMergeVisible: () => handleMergeVisible(),
+    onToggleMultiBubble: () => setMultiBubbleMode(!multiBubbleMode),
   });
   const [activePageId, setActivePageId] = useState<string | null>(pages[0]?.id ?? null);
   const [pagesManagerOpen, setPagesManagerOpen] = useState(pages.length === 0);
@@ -401,9 +402,17 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     setTyperCurrentFolderId(typerLines[typerIndex]?.style.folderId ?? null);
   }, [typerIndex, typerLines]);
   // Multi-Bubble mode: draw a rect per bubble (Rectangular Marquee) and queue it instead of
-  // placing immediately, then place every queued rect's line in one go, in script order.
+  // placing immediately, then place every queued rect's line in one go, in script order. Each
+  // capture snapshots the script line it was drawn against (not just the rect), so switching to a
+  // different line — via the panel's own jump-to-line click — between two captures sticks: Place
+  // All replays each capture's own line/style rather than re-deriving position from sequential
+  // order at fill time.
   const [multiBubbleMode, setMultiBubbleModeState] = useState(false);
-  const [multiBubbleRects, setMultiBubbleRects] = useState<{ x: number; y: number; width: number; height: number }[]>([]);
+  const [multiBubbleRects, setMultiBubbleRects] = useState<{ rect: { x: number; y: number; width: number; height: number }; lineIndex: number }[]>([]);
+  // Script-line indices already stamped onto the canvas (single-click placement or a multi-bubble
+  // fill) — drives the line list's ✓ badge. Not persisted (mirrors typerIndex's own current
+  // session-only behaviour); cleared whenever the script itself changes or progress is reset.
+  const [typerPlacedIndices, setTyperPlacedIndices] = useState<Set<number>>(new Set());
 
   function setMultiBubbleMode(enabled: boolean) {
     setMultiBubbleModeState(enabled);
@@ -416,17 +425,44 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
       swalToast({ icon: 'info', title: 'Draw a rectangle around a bubble first' });
       return;
     }
-    setMultiBubbleRects(prev => [...prev, selection]);
+    if (!typerLines[typerIndex]) {
+      swalToast({ icon: 'info', title: 'No more lines to capture' });
+      return;
+    }
+    setMultiBubbleRects(prev => [...prev, { rect: selection, lineIndex: typerIndex }]);
     setSelection(NO_SELECTION);
+    // Auto-advance, same as a single armed canvas click — lets the user jump to a different line
+    // in the panel before drawing the *next* bubble, which is what lets each capture carry its own
+    // style rather than every queued bubble inheriting whatever line was active at Place-All time.
+    setTyperIndex(typerIndex + 1);
+  }
+
+  function handleRemoveLastBubbleRect() {
+    setMultiBubbleRects(prev => prev.slice(0, -1));
+  }
+
+  function handleClearAllBubbleRects() {
+    setMultiBubbleRects([]);
   }
 
   function handlePlaceAllBubbles() {
     if (multiBubbleRects.length === 0) return;
     const newLayers: StudioLayer[] = [];
-    let idx = typerIndex;
-    for (const rect of multiBubbleRects) {
-      const line = typerLines[idx];
-      if (!line) break;
+    const placedNow: number[] = [];
+    let pageBoundaryHint: string | undefined;
+
+    for (const capture of multiBubbleRects) {
+      const line = typerLines[capture.lineIndex];
+      if (!line) continue;
+      // A captured line tagged with a page hint means the script expects a page switch before it —
+      // its rect was drawn on the page that was active *then*, so placing it after switching would
+      // land it in the wrong spot. Stop before it, switch pages, and drop the rest of the queue,
+      // matching the real extension's "reaching a Page N marker stops the fill" behaviour.
+      if (line.pageHint) {
+        pageBoundaryHint = line.pageHint;
+        break;
+      }
+      const { rect } = capture;
       const { content, style, boldOverride, italicOverride } = line;
       const lineCount = content.split('\n').length || 1;
       const textWidth = Math.max(40, Math.min(rect.width, 400));
@@ -446,11 +482,34 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
         strokeWidth: style.strokeWidth,
       };
       newLayers.push(layer);
-      idx += 1;
+      placedNow.push(capture.lineIndex);
     }
-    updateLayers(current => [...current, ...newLayers], 'Place TypeR Multi-Bubble');
-    setTyperIndex(idx);
-    if (idx >= typerLines.length) setTyperArmed(false);
+
+    if (newLayers.length > 0) {
+      updateLayers(current => [...current, ...newLayers], 'Place TypeR Multi-Bubble');
+      setTyperPlacedIndices(prev => {
+        const next = new Set(prev);
+        placedNow.forEach(i => next.add(i));
+        return next;
+      });
+    }
+
+    if (pageBoundaryHint) {
+      const wantNumber = Number(pageBoundaryHint);
+      const target = pages.find(p => {
+        const match = p.original.filename.match(/(\d+)(?!.*\d)/);
+        return match && Number(match[1]) === wantNumber;
+      }) ?? pages[wantNumber - 1];
+      if (target) setActivePageId(target.id);
+      setMultiBubbleRects([]);
+      setActiveTool('select');
+      swalToast({ icon: 'info', title: `Placed ${newLayers.length}, stopped at Page ${pageBoundaryHint}` });
+      return;
+    }
+
+    const nextIndex = placedNow.length > 0 ? Math.max(...placedNow) + 1 : typerIndex;
+    setTyperIndex(nextIndex);
+    if (nextIndex >= typerLines.length) setTyperArmed(false);
     setMultiBubbleRects([]);
     setActiveTool('select');
     swalToast({ icon: 'success', title: `Placed ${newLayers.length} line${newLayers.length === 1 ? '' : 's'}` });
@@ -1263,6 +1322,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
       };
       updateLayers(current => [...current, layer], 'Place TypeR Line');
       setActiveLayerId(layer.id);
+      setTyperPlacedIndices(prev => new Set(prev).add(typerIndex));
       const nextIndex = typerIndex + 1;
       setTyperIndex(nextIndex);
       if (nextIndex >= typerLines.length) setTyperArmed(false);
@@ -1616,7 +1676,10 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
   // copy-pasted prop list could quietly drift between the two.
   const typerPanelProps = {
     script: typerScript,
-    onScriptChange: setTyperScript,
+    // Line indices no longer correspond to the same content once the script text itself changes,
+    // so a fresh script means a fresh placed-line history (the underlying layers already placed
+    // stay on the canvas either way — this only clears the ✓ bookkeeping).
+    onScriptChange: (script: string) => { setTyperScript(script); setTyperPlacedIndices(new Set()); },
     styles: typerStyles,
     onStylesChange: setTyperStyles,
     folders: typerFolders,
@@ -1641,6 +1704,9 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     queuedBubbleCount: multiBubbleRects.length,
     onAddBubbleRect: handleAddBubbleRect,
     onPlaceAllBubbles: handlePlaceAllBubbles,
+    onRemoveLastBubble: handleRemoveLastBubbleRect,
+    onClearAllBubbles: handleClearAllBubbleRects,
+    placedIndices: typerPlacedIndices,
   };
 
   const typerPanel = typerFloating ? (
@@ -1899,7 +1965,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
       onPaintStrokeEnd={handlePaintStrokeEnd}
       onEyedropperPick={setForeground}
       onCommitCrop={handleCommitCrop}
-      queuedBubbleRects={multiBubbleRects}
+      queuedBubbleRects={multiBubbleRects.map(c => c.rect)}
       queuedSliceRects={sliceRects}
       transformingSelection={transformingSelection}
       onExitTransformSelection={() => setTransformingSelection(false)}
