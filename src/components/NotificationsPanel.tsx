@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { Bell, CheckCheck } from 'lucide-react';
+import { Bell, CheckCheck, Trash2 } from 'lucide-react';
 import { Modal, Button, Skeleton } from './ui';
-import { AppNotification, listNotifications, markRead, markAllRead } from '../lib/notifications';
+import { swal } from '../lib/swalTheme';
+import { AppNotification, listNotifications, markRead, markAllRead, deleteNotification, deleteAllNotifications } from '../lib/notifications';
 
 export function NotificationsPanel({ open, onClose, onChanged }: { open: boolean; onClose: () => void; onChanged: () => void }) {
   const [items, setItems] = useState<AppNotification[]>([]);
@@ -28,6 +29,25 @@ export function NotificationsPanel({ open, onClose, onChanged }: { open: boolean
     onChanged();
   };
 
+  const handleDelete = async (id: string) => {
+    await deleteNotification(id);
+    setItems(prev => prev.filter(n => n.id !== id));
+    onChanged();
+  };
+
+  const handleDeleteAll = async () => {
+    const result = await swal({
+      icon: 'warning',
+      title: 'Delete all notifications?',
+      showCancelButton: true,
+      confirmButtonText: 'Delete All',
+    });
+    if (!result.isConfirmed) return;
+    await deleteAllNotifications();
+    setItems([]);
+    onChanged();
+  };
+
   const hasUnread = items.some(n => !n.read);
 
   return (
@@ -36,10 +56,17 @@ export function NotificationsPanel({ open, onClose, onChanged }: { open: boolean
       onClose={onClose}
       size="sm"
       title="Notifications"
-      footer={hasUnread ? (
-        <Button variant="secondary" onClick={handleMarkAllRead} className="w-full">
-          <CheckCheck size={14} /> Mark all read
-        </Button>
+      footer={items.length > 0 ? (
+        <div className="flex gap-2">
+          {hasUnread && (
+            <Button variant="secondary" onClick={handleMarkAllRead} className="flex-1">
+              <CheckCheck size={14} /> Mark all read
+            </Button>
+          )}
+          <Button variant="danger" onClick={handleDeleteAll} className="flex-1">
+            <Trash2 size={14} /> Delete all
+          </Button>
+        </div>
       ) : undefined}
     >
       {loading ? (
@@ -62,18 +89,25 @@ export function NotificationsPanel({ open, onClose, onChanged }: { open: boolean
       ) : (
         <div className="space-y-2">
           {items.map(n => (
-            <button
+            <div
               key={n.id}
               onClick={() => !n.read && handleMarkRead(n.id)}
-              className={`w-full text-left p-3 rounded-xl border transition-colors ${n.read ? 'border-hairline bg-transparent' : 'border-accent/30 bg-accent-soft'}`}
+              className={`group relative w-full text-left p-3 rounded-xl border transition-colors cursor-pointer ${n.read ? 'border-hairline bg-transparent' : 'border-accent/30 bg-accent-soft'}`}
             >
-              <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center justify-between gap-2 pr-6">
                 <p className="text-sm font-semibold text-ink">{n.title}</p>
                 {!n.read && <span className="w-2 h-2 rounded-full bg-accent shrink-0" />}
               </div>
-              {n.body && <p className="text-xs text-ink-muted mt-0.5">{n.body}</p>}
+              {n.body && <p className="text-xs text-ink-muted mt-0.5 pr-6">{n.body}</p>}
               <p className="text-[10px] text-ink-faint mt-1">{new Date(n.created_at).toLocaleString()}</p>
-            </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); handleDelete(n.id); }}
+                aria-label="Delete notification"
+                className="absolute top-2.5 right-2.5 p-1 rounded-lg text-ink-faint opacity-0 group-hover:opacity-100 hover:text-danger hover:bg-danger/10 transition-all"
+              >
+                <Trash2 size={13} />
+              </button>
+            </div>
           ))}
         </div>
       )}
