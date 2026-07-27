@@ -4,7 +4,7 @@ import {
   Users, ImagePlus, Plus, Mail, Check, X, Crown, ShieldCheck, ArrowUpCircle, ArrowDownCircle, UserMinus,
   Send, ListTodo, Paperclip, CalendarClock, Trash2, Wallet, Flame, Trophy, BarChart3, Link as LinkIcon,
   ThumbsUp, ThumbsDown, Pencil, LogOut, Clock3, PiggyBank, Home, MessageCircle, Globe, Lock, ArrowLeft, UserPlus,
-  Megaphone, AlertTriangle, ChevronDown,
+  Megaphone, AlertTriangle, ChevronDown, Boxes,
 } from 'lucide-react';
 import { GlassCard, Button, Input, Textarea, Modal, Switch, SkeletonCard, SkeletonRow } from './ui';
 import { TeamUploadModal, type TeamUploadMeta } from './TeamUploadModal';
@@ -2974,6 +2974,15 @@ async function ensurePrivateFolderId(cc: CloudClient, team: Team, userId: string
   return refreshed.find(f => f.parentId === null && f.name === name)?.id ?? null;
 }
 
+/** The Team Files browser only ever shows ZIP backups — checked against the underlying
+ *  Telegram file's own name (not the possibly-custom display name/meta.name, which might
+ *  omit the extension entirely), matching how downloadCloudFile derives a file's real
+ *  extension elsewhere in this file. */
+function isZipFile(f: CloudFile): boolean {
+  const rawName = (f.msg as any)?.file?.name as string | undefined;
+  return (rawName || f.name || '').toLowerCase().endsWith('.zip');
+}
+
 function TeamFilesSection({ team, canManage, canManageCloudFiles, cc, members }: { team: Team; canManage: boolean; canManageCloudFiles: boolean; cc: CloudClient; members: TeamMember[] }) {
   const [files, setFiles] = useState<CloudFile[]>([]);
   const [folders, setFolders] = useState<CloudFolder[]>([]);
@@ -3165,12 +3174,16 @@ function TeamFilesSection({ team, canManage, canManageCloudFiles, cc, members }:
   // task-submission/reference files land in the same Telegram channel but
   // aren't deliberate Team Cloud uploads, so they're excluded by the flags
   // set at their own upload call sites (see upsertCloudFileMeta callers).
+  // This browser is specifically for ZIP backups (matching the personal TeleCloud's own
+  // workspace-backup listing, which is ZIP-only by construction) — a reference photo or
+  // other non-ZIP file uploaded into the same channel/folder isn't a deliverable and
+  // shouldn't clutter this card grid.
   const filesInFolder = files.filter(f => {
     if (f.folderId !== currentFolderId) return false;
     if (!canSeeFile(f)) return false;
     const meta = metaByMsgId.get(f.id);
     if (meta?.is_chat_upload || meta?.is_task_submission) return false;
-    return true;
+    return isZipFile(f);
   });
   const inFinished = currentFolder?.name === 'Finished';
 
@@ -3210,9 +3223,9 @@ function TeamFilesSection({ team, canManage, canManageCloudFiles, cc, members }:
         <p className="text-[11px] text-ink-faint">You're not a member of this folder — ask an admin to add you before uploading here.</p>
       )}
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
         {filesInFolder.length === 0 && (
-          <p className="text-xs text-ink-faint text-center py-6 sm:col-span-2 lg:col-span-3">No files in this folder yet.</p>
+          <p className="text-xs text-ink-faint text-center py-6 sm:col-span-2 lg:col-span-3">No ZIP backups in this folder yet.</p>
         )}
         {filesInFolder.map(f => {
           const meta = metaByMsgId.get(f.id);
@@ -3220,31 +3233,32 @@ function TeamFilesSection({ team, canManage, canManageCloudFiles, cc, members }:
           const fileComments = comments.filter(c => c.fileId === f.id);
           const displayName = meta?.display_name || f.name;
           return (
-            <GlassCard key={f.id} className="overflow-hidden flex flex-col">
-              {meta?.cover_image_path ? (
-                <div className="w-full aspect-[16/9] bg-ink/5 flex items-center justify-center overflow-hidden">
-                  <img src={`${meta.cover_image_path}?v=${meta.cover_version}`} alt="" className="w-full h-full object-contain" />
-                </div>
-              ) : null}
-              <div className="p-3 space-y-2 flex-1">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="min-w-0">
-                    <p className="text-xs font-semibold text-ink truncate">{displayName}</p>
-                    <p className="text-[10px] text-ink-faint">
-                      {cc.formatSize(f.sizeBytes)} · {inFinished ? <span className="font-semibold text-accent">{uploaderName(f)}</span> : uploaderName(f)}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-1 shrink-0">
-                    {(canManage || canManageCloudFiles) && (
-                      <button onClick={() => handleCoverPick(f)} disabled={coverBusyId === f.id} aria-label={`Set cover for ${displayName}`} className="p-1.5 rounded-lg text-ink-faint hover:text-accent hover:bg-accent-soft transition-colors">
-                        <ImagePlus size={14} />
-                      </button>
-                    )}
-                    <button onClick={() => handleDownload(f)} aria-label={`Download ${displayName}`} className="p-1.5 rounded-lg text-ink-faint hover:text-accent hover:bg-accent-soft transition-colors">
-                      <Download size={14} />
+            <GlassCard key={f.id} radius="xl" className="overflow-hidden flex flex-col hover:border-accent/50 transition-colors group">
+              <div className="h-40 w-full bg-accent-soft flex flex-col items-center justify-center border-b border-hairline relative overflow-hidden">
+                {meta?.cover_image_path ? (
+                  <>
+                    <img src={`${meta.cover_image_path}?v=${meta.cover_version}`} alt="" className="w-full h-full object-cover opacity-90 group-hover:opacity-100 transition-opacity" />
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent" />
+                  </>
+                ) : (
+                  <Boxes size={32} className="text-accent/50" />
+                )}
+                <span className="absolute top-2 left-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wide bg-black/50 text-white backdrop-blur-sm">
+                  <Boxes size={10} /> ZIP
+                </span>
+                <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  {(canManage || canManageCloudFiles) && (
+                    <button onClick={() => handleCoverPick(f)} disabled={coverBusyId === f.id} aria-label={`Set cover for ${displayName}`} className="p-1.5 rounded-lg bg-black/40 text-white">
+                      <ImagePlus size={12} />
                     </button>
-                  </div>
+                  )}
                 </div>
+              </div>
+              <div className="p-4 flex flex-col gap-2 flex-1">
+                <h4 className="font-bold text-ink text-base truncate">{displayName}</h4>
+                <p className="text-xs text-ink-muted bg-ink/5 px-2 py-1.5 rounded-lg border border-hairline truncate">
+                  {cc.formatSize(f.sizeBytes)} · {inFinished ? <span className="font-semibold text-accent">{uploaderName(f)}</span> : uploaderName(f)}
+                </p>
 
                 {(canManage || canManageCloudFiles) && (
                   <div className="flex items-center gap-1.5">
@@ -3263,6 +3277,13 @@ function TeamFilesSection({ team, canManage, canManageCloudFiles, cc, members }:
                 {!(canManage || canManageCloudFiles) && visibility === 'private' && (
                   <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-ink/5 text-ink-faint inline-flex items-center gap-1"><Lock size={9} /> Private</span>
                 )}
+
+                <div className="flex justify-between items-center text-xs text-ink-muted font-mono border-t border-hairline pt-2">
+                  <span>{new Date(f.date).toLocaleDateString()}</span>
+                  <button onClick={() => handleDownload(f)} className="text-accent hover:text-ink flex items-center gap-1 font-sans font-bold bg-accent-soft hover:opacity-80 px-2 py-1 rounded transition-colors">
+                    <Download size={14} /> Download
+                  </button>
+                </div>
 
                 <div className="pt-2 border-t border-hairline space-y-1.5">
                   <p className="text-[9px] font-semibold text-accent uppercase tracking-wide">Comments</p>
