@@ -22,7 +22,7 @@ import {
   flattenTree, findLayer, updateLayer, mapTree, removeLayers, insertAfter, moveWithinParent, cloneSubtree,
   collectSubtree, getParent, getSiblings, groupLayers, ungroup, reparent, canBeClipBase,
 } from './layerTree';
-import { NO_SELECTION, hasSelection, featherSelection, growSelection, pathToSelection, alphaMaskToSelection, selectionBounds, type Selection } from './paint/selection';
+import { NO_SELECTION, hasSelection, featherSelection, growSelection, pathToSelection, alphaMaskToSelection, selectionBounds, selectionToAlphaCanvas, type Selection } from './paint/selection';
 import { strokePathOntoCanvas, fillPathOntoCanvas, type PaintSettings, type LiquifyMode, type SymmetryMode } from './paint/paintEngine';
 import type { BrushShape } from './paint/brushTip';
 import { PAINT_TOOLS } from './paint/usePaintLayer';
@@ -255,6 +255,33 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
   const [activePageId, setActivePageId] = useState<string | null>(pages[0]?.id ?? null);
   const [pagesManagerOpen, setPagesManagerOpen] = useState(pages.length === 0);
   const [activeTool, setActiveTool] = useState('select');
+
+  /**
+   * The Magic Erase rail tool is a labeled shortcut into Quick Mask, not a second paint target —
+   * picking it arms Quick Mask so any paint tool draws a manual mask (reusing that whole
+   * already-tested "paint an alpha buffer" mechanism, same as Quick Mask itself reuses the paint
+   * engine); switching to any other tool auto-commits it into a real selection the same way toggling
+   * Quick Mask off always does, so the drawn area is ready to send. The ref guards against stealing
+   * an unrelated Quick Mask session the user started independently (Q / Select menu) — only a Quick
+   * Mask session *this effect* armed gets auto-committed on the way out.
+   */
+  const magicEraseArmedQuickMaskRef = useRef(false);
+  useEffect(() => {
+    if (activeTool === 'magic-erase') {
+      if (!quickMaskActive) {
+        setQuickMaskActive(true);
+        magicEraseArmedQuickMaskRef.current = true;
+      }
+      dock.selectTab('magicerase');
+    } else if (magicEraseArmedQuickMaskRef.current) {
+      magicEraseArmedQuickMaskRef.current = false;
+      const result = canvasRef.current?.commitQuickMask();
+      if (result) setSelection(result);
+      setQuickMaskActive(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTool]);
+
   const [showCleaned, setShowCleaned] = useState(false);
   const [overlayOpacity, setOverlayOpacity] = useState(0);
   const [showGrid, setShowGrid] = useState(false);
@@ -1252,37 +1279,24 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
   }
 
   /**
-   * Sends the flattened page plus a mask built from the selected text blocks (white = erase) to the
-   * user-configured Magic Erase server, and lands the returned inpainted image as a new top
-   * clean-patch layer — matches this app's "new layer = a working copy, never a destructive
-   * in-place edit" convention (see handleAddLayer), just seeded from the server's result instead of
-   * the background.
+   * Sends the flattened page plus a black/white mask (white = erase) to the user-configured Magic
+   * Erase server, and lands the returned inpainted image as a new top clean-patch layer — matches
+   * this app's "new layer = a working copy, never a destructive in-place edit" convention (see
+   * handleAddLayer), just seeded from the server's result instead of the background. Shared by both
+   * ways of picking an erase area: detected text blocks, and a manually drawn mask/selection.
    */
-  async function handleSendToMagicErase(regionIds: string[]) {
-    if (!activePageId || !canvasRef.current) return;
-    const targetIds = new Set(regionIds);
-    const targets = magicEraseRegions.filter(r => targetIds.has(r.id));
-    if (targets.length === 0) return;
+  async function sendMaskToMagicErase(maskCanvas: HTMLCanvasElement): Promise<boolean> {
+    if (!activePageId || !canvasRef.current) return false;
     if (!magicEraseServer.trim()) {
       swal({ icon: 'warning', title: 'No Magic Erase server set', text: 'Add a server address in Settings first.' });
-      return;
+      return false;
     }
     const snapshot = canvasRef.current.getExportSnapshot();
-    if (!snapshot) return;
+    if (!snapshot) return false;
 
     setMagicEraseBusy(true);
     try {
       const flattened = await renderFlattenedPage(snapshot);
-      const maskCanvas = document.createElement('canvas');
-      maskCanvas.width = flattened.width;
-      maskCanvas.height = flattened.height;
-      const maskCtx = maskCanvas.getContext('2d');
-      if (!maskCtx) throw new Error('Could not build a mask canvas.');
-      maskCtx.fillStyle = 'black';
-      maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
-      maskCtx.fillStyle = 'white';
-      for (const region of targets) maskCtx.fillRect(region.x, region.y, region.width, region.height);
-
       const toBlob = (c: HTMLCanvasElement) => new Promise<Blob>((resolve, reject) => {
         c.toBlob(b => (b ? resolve(b) : reject(new Error('Could not encode image.'))), 'image/png');
       });
@@ -1305,17 +1319,57 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
       } finally {
         URL.revokeObjectURL(resultUrl);
       }
-      setMagicEraseSelectedIds(prev => { const next = new Set(prev); for (const id of regionIds) next.delete(id); return next; });
       swalToast({ icon: 'success', title: 'Magic Erase applied' });
+      return true;
     } catch (err) {
       swal({
         icon: 'error',
         title: 'Magic Erase failed',
         text: err instanceof MagicEraseError ? err.message : 'Something went wrong reaching the server.',
       });
+      return false;
     } finally {
       setMagicEraseBusy(false);
     }
+  }
+
+  async function handleSendToMagicErase(regionIds: string[]) {
+    const targetIds = new Set(regionIds);
+    const targets = magicEraseRegions.filter(r => targetIds.has(r.id));
+    if (targets.length === 0 || !activePage) return;
+    const maskCanvas = document.createElement('canvas');
+    maskCanvas.width = activePage.original.width;
+    maskCanvas.height = activePage.original.height;
+    const maskCtx = maskCanvas.getContext('2d');
+    if (!maskCtx) return;
+    maskCtx.fillStyle = 'black';
+    maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
+    maskCtx.fillStyle = 'white';
+    for (const region of targets) maskCtx.fillRect(region.x, region.y, region.width, region.height);
+    const applied = await sendMaskToMagicErase(maskCanvas);
+    if (applied) {
+      setMagicEraseSelectedIds(prev => { const next = new Set(prev); for (const id of regionIds) next.delete(id); return next; });
+    }
+  }
+
+  /**
+   * The manual-mask path: whatever the current selection is — drawn with the Magic Erase tool
+   * (Quick Mask under the hood, see the activeTool sync effect above), or with Lasso/Marquee/Magic
+   * Wand — gets rasterized to alpha and sent as-is. Same server round-trip as the text-block path,
+   * just a different mask source.
+   */
+  async function handleSendSelectionToMagicErase() {
+    if (!activePage || !hasSelection(selection)) return;
+    const maskCanvas = document.createElement('canvas');
+    maskCanvas.width = activePage.original.width;
+    maskCanvas.height = activePage.original.height;
+    const maskCtx = maskCanvas.getContext('2d');
+    if (!maskCtx) return;
+    maskCtx.fillStyle = 'black';
+    maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
+    maskCtx.drawImage(selectionToAlphaCanvas(selection, maskCanvas.width, maskCanvas.height), 0, 0);
+    const applied = await sendMaskToMagicErase(maskCanvas);
+    if (applied) setSelection(NO_SELECTION);
   }
 
   function handleMagicEraseToggleSelect(id: string) {
@@ -1520,6 +1574,10 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
       onSendToMagicErase={handleSendToMagicErase}
       onJumpToRegion={(region) => setSelection({ kind: 'rect', x: region.x, y: region.y, width: region.width, height: region.height })}
       onOpenSettings={() => swalToast({ icon: 'info', title: 'Open the app\'s Settings tab to set a Magic Erase server' })}
+      hasManualSelection={hasSelection(selection)}
+      onSendSelectionToMagicErase={handleSendSelectionToMagicErase}
+      onArmMagicEraseTool={() => setActiveTool('magic-erase')}
+      magicEraseToolArmed={activeTool === 'magic-erase'}
     />
   );
 

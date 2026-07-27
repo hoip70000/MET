@@ -102,6 +102,10 @@ export const STUDIO_TOOL_GROUPS: StudioToolGroup[] = [
     ],
   },
   { id: 'liquify', tools: [{ id: 'liquify', label: 'Liquify', icon: Wind, enabled: true }] },
+  // Paints a scratch mask (reuses Quick Mask's paint-any-tool-onto-an-alpha-buffer machinery — see
+  // Studio.tsx) rather than owning a separate one; picking this tool is just a labeled shortcut into
+  // that same mechanism, tuned for marking an area to send to Magic Erase instead of a selection.
+  { id: 'magic-erase', tools: [{ id: 'magic-erase', label: 'Magic Erase', icon: Sparkles, enabled: true }] },
 
   {
     id: 'pen', groupStart: true,

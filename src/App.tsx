@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
   Plus, Trash2, BookOpen, Layers, FileStack, ImagePlus, Sparkles, Boxes, Download, Upload,
-  UploadCloud, FileArchive, Tag, X, PackagePlus, Pencil
+  UploadCloud, FileArchive, X, PackagePlus, Pencil, Search
 } from 'lucide-react';
 import { get, set } from 'idb-keyval';
 import { MangaSeries, Volume, Chapter, Workspace, Page } from './types';
@@ -65,6 +65,10 @@ export default function App() {
   // Tag editor modal
   const [tagEditorWorkspaceId, setTagEditorWorkspaceId] = useState<string | null>(null);
   const [newTagValue, setNewTagValue] = useState('');
+
+  // Workspace search — toggled from a small icon next to "My Workspaces", filters by name/tag.
+  const [workspaceSearchOpen, setWorkspaceSearchOpen] = useState(false);
+  const [workspaceSearchQuery, setWorkspaceSearchQuery] = useState('');
 
   // Studio entrance transition — set on a chapter-card click, cleared once
   // StudioBuildTransition finishes and hands off to setActiveChapterId.
@@ -206,6 +210,12 @@ export default function App() {
       });
     }
   }, []);
+
+  const visibleWorkspaces = (() => {
+    const q = workspaceSearchQuery.trim().toLowerCase();
+    if (!q) return workspaces;
+    return workspaces.filter(w => w.name.toLowerCase().includes(q) || w.tags.some(t => t.toLowerCase().includes(q)));
+  })();
 
   const activeWorkspace = workspaces.find(w => w.id === activeWorkspaceId) || null;
   const mangas = activeWorkspace?.mangas || [];
@@ -1025,6 +1035,36 @@ export default function App() {
                   <div className="flex items-center justify-between">
                     <h2 className="text-lg font-display font-semibold text-ink">My Workspaces</h2>
                     <div className="flex items-center gap-2">
+                      {workspaceSearchOpen ? (
+                        <div className="flex items-center gap-1.5 bg-ink/5 border border-hairline rounded-xl px-2.5 h-8">
+                          <Search size={14} className="text-ink-faint shrink-0" />
+                          <input
+                            autoFocus
+                            type="text"
+                            placeholder="Search workspaces..."
+                            value={workspaceSearchQuery}
+                            onChange={(e) => setWorkspaceSearchQuery(e.target.value)}
+                            onKeyDown={(e) => { if (e.key === 'Escape') { setWorkspaceSearchOpen(false); setWorkspaceSearchQuery(''); } }}
+                            className="bg-transparent outline-none text-xs text-ink placeholder:text-ink-faint w-32 sm:w-44"
+                          />
+                          <button
+                            onClick={() => { setWorkspaceSearchOpen(false); setWorkspaceSearchQuery(''); }}
+                            aria-label="Close search"
+                            className="text-ink-faint hover:text-ink"
+                          >
+                            <X size={13} />
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setWorkspaceSearchOpen(true)}
+                          aria-label="Search workspaces"
+                          title="Search workspaces"
+                          className="p-1.5 rounded-lg hover:bg-ink/10 text-ink-faint hover:text-ink transition-colors"
+                        >
+                          <Search size={16} />
+                        </button>
+                      )}
                       <Button size="sm" variant="secondary" onClick={() => mspImportInputRef.current?.click()}>
                         <Upload size={14} /> Import Project
                       </Button>
@@ -1048,9 +1088,15 @@ export default function App() {
                       <p className="text-sm text-ink-muted max-w-sm">Tap the + button below to create a workspace and start organizing your manga and manhwa libraries.</p>
                     </GlassCard>
                   )}
+                  {!isLoadingLibrary && workspaces.length > 0 && visibleWorkspaces.length === 0 && (
+                    <GlassCard className="p-10 flex flex-col items-center text-center gap-3">
+                      <Search className="text-ink-faint" size={30} />
+                      <p className="text-sm text-ink-muted max-w-sm">No workspaces match "{workspaceSearchQuery}".</p>
+                    </GlassCard>
+                  )}
                   {!isLoadingLibrary && (
                   <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
-                    {interleaveWithAds(workspaces, ws => (
+                    {interleaveWithAds(visibleWorkspaces, ws => (
                       <button key={ws.id} onClick={() => setActiveWorkspaceId(ws.id)} className="stagger-item group relative text-left overflow-hidden rounded-2xl">
                         <GlassCard className="overflow-hidden flex flex-col h-full transition-transform group-hover:-translate-y-0.5">
                           <div className="aspect-[3/4] bg-gradient-to-br from-accent/25 to-accent/5 flex items-center justify-center overflow-hidden">
@@ -1099,14 +1145,6 @@ export default function App() {
                             title="Upload to Telecloud"
                           >
                             <UploadCloud size={12} />
-                          </button>
-                          <button
-                            onClick={(e) => { e.stopPropagation(); setTagEditorWorkspaceId(ws.id); }}
-                            className="p-1.5 rounded-lg bg-black/40 text-white hover:bg-black/60"
-                            aria-label="Edit tags"
-                            title="Edit tags"
-                          >
-                            <Tag size={12} />
                           </button>
                           <button
                             onClick={(e) => { e.stopPropagation(); handleExportWorkspace(ws); }}
