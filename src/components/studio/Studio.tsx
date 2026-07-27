@@ -47,6 +47,11 @@ import { FontsPanel } from './FontsPanel';
 import { BrushesPanel } from './BrushesPanel';
 import type { BrushPreset } from '../../lib/brushStore';
 import { AdjustmentPanel } from './AdjustmentPanel';
+import { MagicErasePanel } from './MagicErasePanel';
+import { MagicEraseLoadingOverlay } from './MagicEraseLoadingOverlay';
+import { detectTextRegions, type TextRegion } from '../../lib/textDetect';
+import { callMagicErase, MagicEraseError } from '../../lib/magicErase';
+import { loadMagicEraseServer } from '../../lib/magicEraseStore';
 import {
   loadChapterStudioData, saveChapterStudioData, pushVersionSnapshot, STUDIO_SCHEMA_VERSION,
   type ChapterStudioData, type SerializedStudioLayer,
@@ -350,6 +355,32 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     }, 400);
     return () => clearTimeout(t);
   }, [chapterId, typerFloatPos]);
+  // Magic Erase: local OCR text detection + per-block flat-color fill or AI inpaint via a
+  // user-configured server (address set in Settings, see magicEraseStore.ts). Regions are keyed to
+  // the page they were detected on so switching pages doesn't leave stale boxes pointing at
+  // coordinates on a different image.
+  const [magicEraseServer, setMagicEraseServer] = useState('');
+  useEffect(() => { loadMagicEraseServer().then(setMagicEraseServer); }, []);
+  const [magicEraseRegions, setMagicEraseRegions] = useState<TextRegion[]>([]);
+  const [magicEraseRegionsPageId, setMagicEraseRegionsPageId] = useState<string | null>(null);
+  const [magicEraseSelectedIds, setMagicEraseSelectedIds] = useState<Set<string>>(new Set());
+  const [magicEraseMinConfidence, setMagicEraseMinConfidence] = useState(60);
+  const [magicEraseFillColor, setMagicEraseFillColor] = useState('#ffffff');
+  const [magicEraseDetecting, setMagicEraseDetecting] = useState(false);
+  const [magicEraseDetectProgress, setMagicEraseDetectProgress] = useState(0);
+  const [magicEraseBusy, setMagicEraseBusy] = useState(false);
+  // A page switch invalidates detected regions — they were measured against whatever page was
+  // active at detect time, and this app's other per-page scratch state (Quick Mask, queued
+  // Multi-Bubble/Slice rects) is cleared the same way rather than silently pointing at the wrong page.
+  useEffect(() => {
+    if (magicEraseRegionsPageId && magicEraseRegionsPageId !== activePageId) {
+      setMagicEraseRegions([]);
+      setMagicEraseSelectedIds(new Set());
+      setMagicEraseRegionsPageId(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePageId]);
+
   // Configurable versions of what used to be a hardcoded "##" ignore-prefix and an implicit
   // empty-prefix-style default, plus arbitrary mid-line tag stripping — mirrors the real TypeR
   // extension's ignoreLinePrefixes/ignoreTags/defaultStyleId settings.
@@ -1163,6 +1194,138 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     setSelection(pathToSelection(activeLayer.path));
   }
 
+  /** Reuses the topmost existing raster layer (matching the paint-tool auto-create effect and
+   *  Stroke/Fill Path's own target-picking convention above) or creates one — Magic Erase's flat-
+   *  color fill is just another paint-family write onto the active clean-patch layer. */
+  function ensureMagicEraseRasterLayer(): string {
+    const existing = topmostRasterLayer();
+    if (existing) return existing.id;
+    const layer = createLayer('clean-patch', `Layer ${flattenTree(layers).length}`);
+    updateLayers(current => [...current, layer], 'Add Layer');
+    setActiveLayerId(layer.id);
+    canvasRef.current?.seedLayerWithBackground(layer.id);
+    return layer.id;
+  }
+
+  async function handleMagicEraseDetectText() {
+    if (!activePageId || !canvasRef.current) return;
+    const snapshot = canvasRef.current.getExportSnapshot();
+    if (!snapshot) return;
+    setMagicEraseDetecting(true);
+    setMagicEraseDetectProgress(0);
+    try {
+      const flattened = await renderFlattenedPage(snapshot);
+      const regions = await detectTextRegions(flattened, {
+        minConfidence: magicEraseMinConfidence,
+        onProgress: setMagicEraseDetectProgress,
+      });
+      setMagicEraseRegions(regions);
+      setMagicEraseRegionsPageId(activePageId);
+      setMagicEraseSelectedIds(new Set(regions.map(r => r.id)));
+      if (regions.length === 0) {
+        swalToast({ icon: 'info', title: 'No confident text found on this page' });
+      }
+    } catch {
+      swal({ icon: 'error', title: 'Text detection failed', text: 'Could not run local OCR on this page.' });
+    } finally {
+      setMagicEraseDetecting(false);
+    }
+  }
+
+  /** Flat-color fill for detected text blocks — either the whole selection at once (uniform) or a
+   *  single block at a time (the panel's per-row color swatch), same function either way since both
+   *  are just "paint these rects this color" onto the active raster layer. */
+  function handleMagicEraseFillRegions(regionIds: string[], color: string) {
+    if (regionIds.length === 0) return;
+    const targetIds = new Set(regionIds);
+    const targets = magicEraseRegions.filter(r => targetIds.has(r.id));
+    if (targets.length === 0) return;
+    const layerId = ensureMagicEraseRasterLayer();
+    const canvas = canvasRef.current?.getPaintCanvas(layerId);
+    const ctx = canvas?.getContext('2d');
+    if (!canvas || !ctx) return;
+    const before = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = color;
+    for (const region of targets) ctx.fillRect(region.x, region.y, region.width, region.height);
+    canvasRef.current?.redrawLayer(layerId);
+    handlePaintStrokeEnd(layerId, before);
+  }
+
+  /**
+   * Sends the flattened page plus a mask built from the selected text blocks (white = erase) to the
+   * user-configured Magic Erase server, and lands the returned inpainted image as a new top
+   * clean-patch layer — matches this app's "new layer = a working copy, never a destructive
+   * in-place edit" convention (see handleAddLayer), just seeded from the server's result instead of
+   * the background.
+   */
+  async function handleSendToMagicErase(regionIds: string[]) {
+    if (!activePageId || !canvasRef.current) return;
+    const targetIds = new Set(regionIds);
+    const targets = magicEraseRegions.filter(r => targetIds.has(r.id));
+    if (targets.length === 0) return;
+    if (!magicEraseServer.trim()) {
+      swal({ icon: 'warning', title: 'No Magic Erase server set', text: 'Add a server address in Settings first.' });
+      return;
+    }
+    const snapshot = canvasRef.current.getExportSnapshot();
+    if (!snapshot) return;
+
+    setMagicEraseBusy(true);
+    try {
+      const flattened = await renderFlattenedPage(snapshot);
+      const maskCanvas = document.createElement('canvas');
+      maskCanvas.width = flattened.width;
+      maskCanvas.height = flattened.height;
+      const maskCtx = maskCanvas.getContext('2d');
+      if (!maskCtx) throw new Error('Could not build a mask canvas.');
+      maskCtx.fillStyle = 'black';
+      maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
+      maskCtx.fillStyle = 'white';
+      for (const region of targets) maskCtx.fillRect(region.x, region.y, region.width, region.height);
+
+      const toBlob = (c: HTMLCanvasElement) => new Promise<Blob>((resolve, reject) => {
+        c.toBlob(b => (b ? resolve(b) : reject(new Error('Could not encode image.'))), 'image/png');
+      });
+      const [imageBlob, maskBlob] = await Promise.all([toBlob(flattened), toBlob(maskCanvas)]);
+      const resultBlob = await callMagicErase(magicEraseServer, imageBlob, maskBlob);
+      const resultUrl = URL.createObjectURL(resultBlob);
+      try {
+        const resultImg = await loadImageFromSrc(resultUrl);
+        const layer = createLayer('clean-patch', 'Magic Erase Result');
+        updateLayers(current => [...current, layer], 'Magic Erase');
+        setActiveLayerId(layer.id);
+        const canvas = canvasRef.current?.getPaintCanvas(layer.id);
+        const ctx = canvas?.getContext('2d');
+        if (canvas && ctx) {
+          const before = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(resultImg, 0, 0, canvas.width, canvas.height);
+          canvasRef.current?.redrawLayer(layer.id);
+          handlePaintStrokeEnd(layer.id, before);
+        }
+      } finally {
+        URL.revokeObjectURL(resultUrl);
+      }
+      setMagicEraseSelectedIds(prev => { const next = new Set(prev); for (const id of regionIds) next.delete(id); return next; });
+      swalToast({ icon: 'success', title: 'Magic Erase applied' });
+    } catch (err) {
+      swal({
+        icon: 'error',
+        title: 'Magic Erase failed',
+        text: err instanceof MagicEraseError ? err.message : 'Something went wrong reaching the server.',
+      });
+    } finally {
+      setMagicEraseBusy(false);
+    }
+  }
+
+  function handleMagicEraseToggleSelect(id: string) {
+    setMagicEraseSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
   /** The layer directly beneath the active one among its siblings — its clip base, if it can be one. */
   const layerBelowActive = (() => {
     if (!activeLayerId) return null;
@@ -1337,10 +1500,34 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     />
   );
 
+  const magicErasePanel = (
+    <MagicErasePanel
+      regions={magicEraseRegions}
+      selectedIds={magicEraseSelectedIds}
+      onToggleSelect={handleMagicEraseToggleSelect}
+      onSelectAll={() => setMagicEraseSelectedIds(new Set(magicEraseRegions.map(r => r.id)))}
+      onSelectNone={() => setMagicEraseSelectedIds(new Set())}
+      minConfidence={magicEraseMinConfidence}
+      onMinConfidenceChange={setMagicEraseMinConfidence}
+      detecting={magicEraseDetecting}
+      detectProgress={magicEraseDetectProgress}
+      onDetect={handleMagicEraseDetectText}
+      fillColor={magicEraseFillColor}
+      onFillColorChange={setMagicEraseFillColor}
+      onFillRegions={handleMagicEraseFillRegions}
+      serverConfigured={!!magicEraseServer.trim()}
+      erasing={magicEraseBusy}
+      onSendToMagicErase={handleSendToMagicErase}
+      onJumpToRegion={(region) => setSelection({ kind: 'rect', x: region.x, y: region.y, width: region.width, height: region.height })}
+      onOpenSettings={() => swalToast({ icon: 'info', title: 'Open the app\'s Settings tab to set a Magic Erase server' })}
+    />
+  );
+
   const allTabs = [
     ...(textPanel ? [{ id: 'text', label: 'Text', content: textPanel }] : []),
     ...(adjustmentPanel ? [{ id: 'adjustment', label: 'Adjustment', content: adjustmentPanel }] : []),
     { id: 'typer', label: 'TypeR', content: typerPanel },
+    { id: 'magicerase', label: 'Magic Erase', content: magicErasePanel },
     { id: 'translation', label: 'Translation', content: translationPanel },
     { id: 'brushes', label: 'Brushes', content: brushesPanel },
     { id: 'color', label: 'Color', content: colorPanel },
@@ -1617,6 +1804,9 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
 
         <div className="flex-1 min-h-0 min-w-0 relative">
           {canvasNode}
+          {(magicEraseBusy || magicEraseDetecting) && (
+            <MagicEraseLoadingOverlay label={magicEraseDetecting ? 'Scanning for text…' : 'Erasing with AI…'} />
+          )}
         </div>
 
         {!panelsHidden && isDesktop && rightOpen && (
