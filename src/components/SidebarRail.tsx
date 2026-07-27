@@ -33,7 +33,7 @@ export function SidebarRail({ activeTab, onTabChange, onCreatePress }: SidebarRa
               <div className={`p-2 rounded-xl transition-all ${active ? 'bg-accent-soft' : 'group-hover:bg-ink/8'}`}>
                 <Icon size={19} strokeWidth={1.8} />
               </div>
-              <span className="text-[10px] font-medium tracking-wide">{tab.label.split(' ')[0]}</span>
+              <span className="text-[10px] font-medium tracking-wide text-center leading-tight px-0.5">{tab.label}</span>
             </button>
           );
         })}
