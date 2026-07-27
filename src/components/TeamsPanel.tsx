@@ -4,8 +4,9 @@ import {
   Users, ImagePlus, Plus, Mail, Check, X, Crown, ShieldCheck, ArrowUpCircle, ArrowDownCircle, UserMinus,
   Send, ListTodo, Paperclip, CalendarClock, Trash2, Wallet, Flame, Trophy, BarChart3, Link as LinkIcon,
   ThumbsUp, ThumbsDown, Pencil, LogOut, Clock3, PiggyBank, Home, MessageCircle, Globe, Lock, ArrowLeft, UserPlus,
-  Megaphone, AlertTriangle, ChevronDown, Boxes,
+  Megaphone, AlertTriangle, ChevronDown, Boxes, Mic,
 } from 'lucide-react';
+import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import { GlassCard, Button, Input, Textarea, Modal, Switch, SkeletonCard, SkeletonRow } from './ui';
 import { TeamUploadModal, type TeamUploadMeta } from './TeamUploadModal';
 import { swal, swalToast, confirmAction } from '../lib/swalTheme';
@@ -3404,6 +3405,87 @@ function formatMessageTime(iso: string): string {
   return new Date(iso).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 }
 
+const MIME_BY_EXTENSION: Record<string, string> = {
+  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml',
+  ogg: 'audio/ogg', mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4', opus: 'audio/opus', aac: 'audio/aac', webm: 'audio/webm',
+};
+const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'];
+const AUDIO_EXTENSIONS = ['webm', 'ogg', 'mp3', 'wav', 'm4a', 'opus', 'aac'];
+
+function getAttachmentKind(name: string): 'image' | 'audio' | 'file' {
+  const ext = name.split('.').pop()?.toLowerCase() ?? '';
+  if (IMAGE_EXTENSIONS.includes(ext)) return 'image';
+  if (AUDIO_EXTENSIONS.includes(ext)) return 'audio';
+  return 'file';
+}
+
+function guessMimeType(name: string): string | undefined {
+  const ext = name.split('.').pop()?.toLowerCase() ?? '';
+  return MIME_BY_EXTENSION[ext];
+}
+
+// Session-only cache (blob URLs can't survive a reload anyway) so a bubble that re-renders
+// — or a second bubble instance somehow pointing at the same message — never re-downloads
+// media it already fetched once.
+const attachmentPreviewCache = new Map<number, string>();
+
+/** A photo or voice-message attachment auto-downloads and renders inline the moment the
+ *  bubble mounts — no manual "click to download" step, unlike a generic file attachment,
+ *  which keeps the existing Paperclip download link/button. */
+function AttachmentPreview({ channelId, msgId, name, onFetchPreview, onDownload }: {
+  channelId: string;
+  msgId: number;
+  name: string;
+  onFetchPreview: (channelId: string, msgId: number, mimeType?: string) => Promise<string | null>;
+  onDownload: () => void;
+}) {
+  const kind = getAttachmentKind(name);
+  const [url, setUrl] = useState<string | null>(attachmentPreviewCache.get(msgId) ?? null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    if (kind === 'file' || url) return;
+    let cancelled = false;
+    onFetchPreview(channelId, msgId, guessMimeType(name)).then(fetched => {
+      if (cancelled) return;
+      if (fetched) {
+        attachmentPreviewCache.set(msgId, fetched);
+        setUrl(fetched);
+      } else {
+        setFailed(true);
+      }
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kind, channelId, msgId]);
+
+  if (kind === 'file') {
+    return (
+      <button onClick={onDownload} className="text-[11px] text-accent hover:text-ink flex items-center gap-1 font-semibold mt-1">
+        <Paperclip size={11} /> {name || 'Attachment'}
+      </button>
+    );
+  }
+
+  if (failed) {
+    return (
+      <button onClick={onDownload} className="text-[11px] text-danger hover:text-ink flex items-center gap-1 font-semibold mt-1">
+        <Paperclip size={11} /> Preview failed — {name || 'Attachment'}
+      </button>
+    );
+  }
+
+  if (!url) {
+    return <div className="mt-1 w-40 h-28 rounded-lg animate-skeleton" />;
+  }
+
+  if (kind === 'image') {
+    return <img src={url} alt={name} className="mt-1 max-w-[240px] max-h-[240px] rounded-lg object-cover cursor-pointer" onClick={() => window.open(url, '_blank')} />;
+  }
+
+  return <audio controls src={url} className="mt-1 h-9 max-w-[240px]" />;
+}
+
 function ChatAvatar({ name, avatar, size = 28 }: { name: string; avatar?: string; size?: number }) {
   return (
     <div
@@ -3479,7 +3561,7 @@ function reactionsSignatureEqual(a: MessageReaction[], b: MessageReaction[]): bo
   return true;
 }
 
-const TeamMessageBubble = memo(function TeamMessageBubble({ message, replied, isMine, canManage, isVerified, reactions, myUserId, teamId, telegramChannelId, onOpenProfile, onReply, onEdit, onDelete, onPin, onReport, onDownloadAttachment, onToggleReaction }: {
+const TeamMessageBubble = memo(function TeamMessageBubble({ message, replied, isMine, canManage, isVerified, reactions, myUserId, teamId, telegramChannelId, onOpenProfile, onReply, onEdit, onDelete, onPin, onReport, onDownloadAttachment, onFetchAttachmentPreview, onToggleReaction }: {
   message: TeamMessage;
   replied: TeamMessage | null;
   isMine: boolean;
@@ -3496,6 +3578,7 @@ const TeamMessageBubble = memo(function TeamMessageBubble({ message, replied, is
   onPin: (id: string, pinned: boolean) => void;
   onReport: (m: TeamMessage) => void;
   onDownloadAttachment: (channelId: string, msgId: number, name: string) => void;
+  onFetchAttachmentPreview: (channelId: string, msgId: number, mimeType?: string) => Promise<string | null>;
   onToggleReaction: (teamId: string, table: 'team_messages', messageId: string, emoji: string) => void;
 }) {
   const m = message;
@@ -3540,12 +3623,13 @@ const TeamMessageBubble = memo(function TeamMessageBubble({ message, replied, is
             <>
               <p className="text-sm text-ink">{renderMarkdownMessage(m.body)}</p>
               {m.attachment_msg_id && (
-                <button
-                  onClick={() => onDownloadAttachment(telegramChannelId, m.attachment_msg_id!, m.attachment_name || 'attachment')}
-                  className="text-[11px] text-accent hover:text-ink flex items-center gap-1 font-semibold mt-1"
-                >
-                  <Paperclip size={11} /> {m.attachment_name || 'Attachment'}
-                </button>
+                <AttachmentPreview
+                  channelId={telegramChannelId}
+                  msgId={m.attachment_msg_id}
+                  name={m.attachment_name || 'attachment'}
+                  onFetchPreview={onFetchAttachmentPreview}
+                  onDownload={() => onDownloadAttachment(telegramChannelId, m.attachment_msg_id!, m.attachment_name || 'attachment')}
+                />
               )}
             </>
           )}
@@ -3565,7 +3649,7 @@ const TeamMessageBubble = memo(function TeamMessageBubble({ message, replied, is
   reactionsSignatureEqual(prev.reactions, next.reactions)
 ));
 
-const DirectMessageBubble = memo(function DirectMessageBubble({ message, replied, isMine, partnerId, isPartnerOnline, reactions, myUserId, teamId, telegramChannelId, partnerName, partnerAvatar, onDownloadAttachment, onReply, onEdit, onDelete, onReport, onToggleReaction }: {
+const DirectMessageBubble = memo(function DirectMessageBubble({ message, replied, isMine, partnerId, isPartnerOnline, reactions, myUserId, teamId, telegramChannelId, partnerName, partnerAvatar, onDownloadAttachment, onFetchAttachmentPreview, onReply, onEdit, onDelete, onReport, onToggleReaction }: {
   message: DirectMessage;
   replied: DirectMessage | null;
   isMine: boolean;
@@ -3578,6 +3662,7 @@ const DirectMessageBubble = memo(function DirectMessageBubble({ message, replied
   partnerName: string;
   partnerAvatar?: string;
   onDownloadAttachment: (channelId: string, msgId: number, name: string) => void;
+  onFetchAttachmentPreview: (channelId: string, msgId: number, mimeType?: string) => Promise<string | null>;
   onReply: (m: DirectMessage) => void;
   onEdit: (m: DirectMessage) => void;
   onDelete: (id: string) => void;
@@ -3620,12 +3705,13 @@ const DirectMessageBubble = memo(function DirectMessageBubble({ message, replied
             <>
               <p className="text-sm text-ink">{renderMarkdownMessage(m.body)}</p>
               {m.attachment_msg_id && (
-                <button
-                  onClick={() => onDownloadAttachment(telegramChannelId, m.attachment_msg_id!, m.attachment_name || 'attachment')}
-                  className="text-[11px] text-accent hover:text-ink flex items-center gap-1 font-semibold mt-1"
-                >
-                  <Paperclip size={11} /> {m.attachment_name || 'Attachment'}
-                </button>
+                <AttachmentPreview
+                  channelId={telegramChannelId}
+                  msgId={m.attachment_msg_id}
+                  name={m.attachment_name || 'attachment'}
+                  onFetchPreview={onFetchAttachmentPreview}
+                  onDownload={() => onDownloadAttachment(telegramChannelId, m.attachment_msg_id!, m.attachment_name || 'attachment')}
+                />
               )}
             </>
           )}
@@ -3732,7 +3818,7 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
     setMentionQuery(null);
   };
 
-  const handleAttach = async (file: File) => {
+  const handleAttach = async (file: File, captionOverride?: string) => {
     if (!team.telegram_channel_id || !cc.isConnected) {
       swal({ icon: 'info', title: 'Connect Telegram', text: 'Connect Telegram and set the team channel to send files in chat.' });
       return;
@@ -3746,7 +3832,7 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
     setAttaching(false);
     if (result) {
       const id = crypto.randomUUID();
-      const text = body.trim() || `📎 ${result.name}`;
+      const text = body.trim() || captionOverride || `📎 ${result.name}`;
       pinToBottom();
       setMessages(prev => upsertById(prev, {
         id, team_id: team.id, sender_id: myUserId || '', body: text,
@@ -3759,6 +3845,8 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
       setBody(''); setReplyTo(null);
     }
   };
+
+  const voiceRecorder = useVoiceRecorder((file) => handleAttach(file, '🎤 Voice message'));
 
   const handleSend = async () => {
     if (!body.trim()) return;
@@ -3838,6 +3926,7 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
             onPin={pinTeamMessage}
             onReport={handleReportMessage}
             onDownloadAttachment={(channelId, msgId, name) => cc.downloadTaskAttachment(channelId, msgId, name)}
+            onFetchAttachmentPreview={(channelId, msgId, mimeType) => cc.fetchAttachmentBlobUrl(channelId, msgId, mimeType)}
             onToggleReaction={toggleReaction}
           />
         ))}
@@ -3887,6 +3976,16 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
           <input ref={fileInputRef} type="file" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) handleAttach(f); }} />
           <button type="button" onClick={() => fileInputRef.current?.click()} disabled={attaching} className="p-2 rounded-xl text-ink-faint hover:text-accent hover:bg-accent-soft transition-colors shrink-0">
             <Paperclip size={16} />
+          </button>
+          <button
+            type="button"
+            onClick={voiceRecorder.toggle}
+            disabled={attaching}
+            className={`p-2 rounded-xl transition-colors shrink-0 ${voiceRecorder.isRecording ? 'text-white bg-danger animate-pulse' : 'text-ink-faint hover:text-accent hover:bg-accent-soft'}`}
+            aria-label={voiceRecorder.isRecording ? 'Stop recording' : 'Record voice message'}
+            title={voiceRecorder.isRecording ? 'Stop recording' : 'Record voice message'}
+          >
+            <Mic size={16} />
           </button>
           <Input placeholder={editingId ? 'Edit message...' : 'Message the team...'} value={body} onChange={e => handleBodyChange(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSend()} className="flex-1" />
           <Button onClick={handleSend}><Send size={14} /></Button>
@@ -3993,7 +4092,7 @@ function DirectThread({ team, partnerId, partnerName, partnerAvatar, onBack, onO
     reactionsByMessageId.set(r.message_id, list);
   }
 
-  const handleAttach = async (file: File) => {
+  const handleAttach = async (file: File, captionOverride?: string) => {
     if (!team.telegram_channel_id || !cc.isConnected) {
       swal({ icon: 'info', title: 'Connect Telegram', text: 'Connect Telegram and set the team channel to send files in chat.' });
       return;
@@ -4007,7 +4106,7 @@ function DirectThread({ team, partnerId, partnerName, partnerAvatar, onBack, onO
     setAttaching(false);
     if (result) {
       const id = crypto.randomUUID();
-      const text = body.trim() || `📎 ${result.name}`;
+      const text = body.trim() || captionOverride || `📎 ${result.name}`;
       pinToBottom();
       setMessages(prev => upsertById(prev, {
         id, team_id: team.id, sender_id: myUserId || '', receiver_id: partnerId, body: text, read: false,
@@ -4018,6 +4117,8 @@ function DirectThread({ team, partnerId, partnerName, partnerAvatar, onBack, onO
       setBody(''); setReplyTo(null);
     }
   };
+
+  const voiceRecorder = useVoiceRecorder((file) => handleAttach(file, '🎤 Voice message'));
 
   const handleSend = async () => {
     if (!body.trim()) return;
@@ -4076,6 +4177,7 @@ function DirectThread({ team, partnerId, partnerName, partnerAvatar, onBack, onO
             partnerName={partnerName}
             partnerAvatar={partnerAvatar}
             onDownloadAttachment={(channelId, msgId, name) => cc.downloadTaskAttachment(channelId, msgId, name)}
+            onFetchAttachmentPreview={(channelId, msgId, mimeType) => cc.fetchAttachmentBlobUrl(channelId, msgId, mimeType)}
             onReply={setReplyTo}
             onEdit={(msg) => { setEditingId(msg.id); setBody(msg.body); }}
             onDelete={deleteDirectMessage}
@@ -4102,6 +4204,16 @@ function DirectThread({ team, partnerId, partnerName, partnerAvatar, onBack, onO
         <input ref={fileInputRef} type="file" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) handleAttach(f); }} />
         <button type="button" onClick={() => fileInputRef.current?.click()} disabled={attaching} className="p-2 rounded-xl text-ink-faint hover:text-accent hover:bg-accent-soft transition-colors shrink-0">
           <Paperclip size={16} />
+        </button>
+        <button
+          type="button"
+          onClick={voiceRecorder.toggle}
+          disabled={attaching}
+          className={`p-2 rounded-xl transition-colors shrink-0 ${voiceRecorder.isRecording ? 'text-white bg-danger animate-pulse' : 'text-ink-faint hover:text-accent hover:bg-accent-soft'}`}
+          aria-label={voiceRecorder.isRecording ? 'Stop recording' : 'Record voice message'}
+          title={voiceRecorder.isRecording ? 'Stop recording' : 'Record voice message'}
+        >
+          <Mic size={16} />
         </button>
         <Input placeholder={editingId ? 'Edit message...' : 'Type a message...'} value={body} onChange={e => setBody(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSend()} className="flex-1" />
         <Button onClick={handleSend}><Send size={14} /></Button>
