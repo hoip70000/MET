@@ -36,6 +36,7 @@
     "react-resizable-panels": "^2.1.9",
     "sweetalert2": "^11.26.24",
     "telegram": "^2.26.22",
+    "tesseract.js": "^7.0.0",
     "vite": "^6.2.3"
   },
   "devDependencies": {
