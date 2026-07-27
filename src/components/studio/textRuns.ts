@@ -162,6 +162,53 @@ export function runAt(content: string, runs: TextRun[], index: number): TextRun 
   return undefined;
 }
 
+/** Character properties that also exist as a layer default. The rest (kerning, baseline shift,
+ *  explicit weight) only exist per-run, so with no selection they're written across every run. */
+export const LAYER_BACKED_CHAR_KEYS = new Set<string>(['fontFamily', 'fontSize', 'color', 'bold', 'italic', 'letterSpacing']);
+
+/**
+ * Applies a character-style patch to a selected range (as run overrides) or, with no range, to the
+ * whole layer — matching Photoshop's Character panel when nothing is selected. Shared by TextPanel's
+ * inline controls and the Text menu's Bold/Italic/Size actions, so the two precedence rules (range vs
+ * layer-wide, and which keys are layer-backed) can't drift apart.
+ */
+export function applyCharPatch(text: TextLayerData, range: { start: number; end: number } | null, patch: RunStylePatch): Partial<TextLayerData> {
+  const runs = text.runs ?? [];
+  if (range && range.end > range.start) {
+    return { runs: applyToRange(text.content, runs, range.start, range.end, patch) };
+  }
+  const layerPatch: Partial<TextLayerData> = {};
+  const runOnly: RunStylePatch = {};
+  const clear: RunStylePatch = {};
+  for (const [key, value] of Object.entries(patch)) {
+    if (LAYER_BACKED_CHAR_KEYS.has(key)) {
+      (layerPatch as Record<string, unknown>)[key] = value;
+      // Clear any run override of this key, or the new layer default would be masked by runs.
+      (clear as Record<string, unknown>)[key] = undefined;
+    } else {
+      (runOnly as Record<string, unknown>)[key] = value;
+    }
+  }
+  let next = runs;
+  if (Object.keys(clear).length) next = applyToRange(text.content, next, 0, text.content.length, clear);
+  if (Object.keys(runOnly).length) next = applyToRange(text.content, next, 0, text.content.length, runOnly);
+  return { ...layerPatch, runs: next };
+}
+
+/** Reads a single resolved character-style value for a range (or the whole layer, with no range) —
+ *  the read-side counterpart of `applyCharPatch`, shared for the same reason. */
+export function resolveCharValue<K extends keyof ResolvedRunStyle>(
+  text: TextLayerData,
+  range: { start: number; end: number } | null,
+  key: K,
+): ResolvedRunStyle[K] {
+  const runs = text.runs ?? [];
+  const anchor = range ? resolveRunStyle(text, runAt(text.content, runs, range.start)) : resolveRunStyle(text);
+  if (!range || range.end <= range.start) return anchor[key];
+  const shared = styleOverRange(text.content, runs, range.start, range.end);
+  return ((shared as Partial<ResolvedRunStyle>)[key] ?? anchor[key]) as ResolvedRunStyle[K];
+}
+
 /**
  * The style shared across `[start, end)`, or `undefined` per key where the range is mixed — so the
  * panel can show a blank/indeterminate control instead of falsely claiming the whole selection is

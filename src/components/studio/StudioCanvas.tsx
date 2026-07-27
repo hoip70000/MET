@@ -176,6 +176,14 @@ export interface StudioCanvasHandle {
    */
   commitCrop: (rect: { x: number; y: number; width: number; height: number }) => Promise<{ original: ProcessedImage; cleaned: ProcessedImage | null } | null>;
   /**
+   * Image > Rotate Canvas: transforms the background (original + cleaned) and every raster layer's
+   * canvas in place, the same shape as `commitCrop` above. Text layer positions are transformed by
+   * the caller (Studio.tsx has the box geometry via `layoutText`, which this module doesn't import) —
+   * this only returns the new page dimensions alongside the transformed images so the caller knows
+   * whether width/height swapped (90°) or stayed put (180°/flip).
+   */
+  rotateCanvas: (dir: 'cw' | 'ccw' | '180' | 'flip-h' | 'flip-v') => Promise<{ original: ProcessedImage; cleaned: ProcessedImage | null; width: number; height: number } | null>;
+  /**
    * Copies the current background pixels into a clean-patch layer's raster canvas. Called right
    * after a new layer is created so Clone/Heal/filter-brush/Liquify tools have real page content
    * to work on immediately — a brand new blank layer would make those tools no-ops, since they
@@ -663,6 +671,56 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
       }
 
       return { original: newOriginal, cleaned: newCleaned };
+    },
+    async rotateCanvas(dir) {
+      if (!page) return null;
+      const cw = page.original.width, ch = page.original.height;
+      const swapped = dir === 'cw' || dir === 'ccw';
+      const nw = swapped ? ch : cw;
+      const nh = swapped ? cw : ch;
+
+      function drawTransformed(ctx: CanvasRenderingContext2D, source: CanvasImageSource) {
+        ctx.save();
+        switch (dir) {
+          case 'cw': ctx.translate(nw, 0); ctx.rotate(Math.PI / 2); break;
+          case 'ccw': ctx.translate(0, nh); ctx.rotate(-Math.PI / 2); break;
+          case '180': ctx.translate(nw, nh); ctx.rotate(Math.PI); break;
+          case 'flip-h': ctx.translate(nw, 0); ctx.scale(-1, 1); break;
+          case 'flip-v': ctx.translate(0, nh); ctx.scale(1, -1); break;
+        }
+        ctx.drawImage(source, 0, 0);
+        ctx.restore();
+      }
+
+      async function rotateSource(pi: ProcessedImage): Promise<ProcessedImage> {
+        const img = await loadImageFromSrc(pi.dataUrl);
+        const canvas = document.createElement('canvas');
+        canvas.width = nw;
+        canvas.height = nh;
+        drawTransformed(canvas.getContext('2d')!, img);
+        return { ...pi, dataUrl: canvas.toDataURL(pi.mimeType || 'image/png'), width: nw, height: nh };
+      }
+
+      const newOriginal = await rotateSource(page.original);
+      const newCleaned = page.cleaned ? await rotateSource(page.cleaned) : null;
+
+      // Same in-place-registry-object approach as commitCrop above, so existing Konva <Image>
+      // references keep working. Masks aren't transformed here either — commitCrop doesn't touch
+      // maskCanvasRegistry, a pre-existing scope limit this mirrors rather than fixes in passing.
+      for (const layerId of Object.keys(paintCanvasRegistry.current)) {
+        const old = paintCanvasRegistry.current[layerId];
+        if (!old) continue;
+        const rotated = document.createElement('canvas');
+        rotated.width = nw;
+        rotated.height = nh;
+        drawTransformed(rotated.getContext('2d')!, old);
+        old.width = nw;
+        old.height = nh;
+        old.getContext('2d')!.drawImage(rotated, 0, 0);
+        redrawLayerNode(layerId);
+      }
+
+      return { original: newOriginal, cleaned: newCleaned, width: nw, height: nh };
     },
     seedLayerWithBackground(layerId: string) {
       const img = imageRef.current;
@@ -2252,6 +2310,10 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
       {editingLayer?.text && (
         <textarea
           autoFocus
+          // Marks this textarea so useStudioShortcuts can let Ctrl/Cmd+B / +I through while editing
+          // dialogue text (that's exactly when they're needed) without opening up every other
+          // shortcut — see isStudioTextEditor() there.
+          data-studio-text-editor="true"
           // Right-aligned text is this app's existing proxy for "this layer is RTL" (see
           // isArabicMajority's auto-default in Studio.tsx) — `dir="rtl"` is what actually moves the
           // caret to the visual right and reverses arrow-key/typing direction to match. A freshly

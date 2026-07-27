@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import {
-  Eye, EyeOff, Lock, Unlock, Plus, Copy, Trash2, ChevronUp, ChevronDown, SlidersHorizontal,
+  Eye, EyeOff, Lock, Unlock, Plus, Copy, Trash2, SlidersHorizontal, ChevronUp, ChevronDown,
   FolderPlus, ChevronRight, FolderOpen, CornerDownRight, Contrast, Settings2,
 } from 'lucide-react';
 import { IconButton } from '../ui';
@@ -72,12 +72,10 @@ interface LayersPanelProps {
    */
   expandedLayerId: string | null;
   onToggleExpanded: (id: string) => void;
-  /** When it's docked in the persistent Color+Layers column, the wrapper controls the collapse
-   *  height — this just renders the toggle button in the header's actions slot. Distinct from
-   *  `onToggleCollapsed` above, which collapses a *group layer's* subtree in the tree, not the
-   *  whole panel. */
-  panelCollapsed?: boolean;
-  onTogglePanelCollapsed?: () => void;
+  /** Set when hosted inside the right-column panel stack, whose own header already shows the name.
+   *  Layers has no collapse chevron of its own — the panel stack keeps it always expanded, filling
+   *  remaining column space, per its "never fully hide the layer list" design goal. */
+  hideTitle?: boolean;
 }
 
 export function LayersPanel({
@@ -85,7 +83,7 @@ export function LayersPanel({
   onOpacityChange, onBlendChange, onAdd, onAddBlank, onAddAdjustment, onDuplicate, onDelete, onDeleteMany, onRename, onMove,
   onGroup, onUngroup, onToggleCollapsed, onToggleClipped, onToggleMask, onToggleMaskEnabled, onSelectMask,
   activeMaskLayerId, onReparent, onOpenSettings, expandedLayerId, onToggleExpanded,
-  panelCollapsed, onTogglePanelCollapsed,
+  hideTitle,
 }: LayersPanelProps) {
   const selected = selectedLayerIds ?? (activeLayerId ? [activeLayerId] : []);
   const [dragId, setDragId] = useState<string | null>(null);
@@ -233,6 +231,7 @@ export function LayersPanel({
   return (
     <StudioPanel
       title="Layers"
+      hideTitle={hideTitle}
       bare
       bodyClassName="py-1.5 px-1.5 flex flex-col gap-1"
       actions={
@@ -252,15 +251,10 @@ export function LayersPanel({
           >
             <Plus size={14} />
           </IconButton>
-          {onTogglePanelCollapsed && (
-            <IconButton size="sm" aria-label={panelCollapsed ? 'Expand Layers panel' : 'Collapse Layers panel'} onClick={onTogglePanelCollapsed} className="!bg-transparent">
-              {panelCollapsed ? <ChevronDown size={13} /> : <ChevronUp size={13} />}
-            </IconButton>
-          )}
         </>
       }
     >
-        {!panelCollapsed && ordered.map(({ layer, depth }) => {
+        {ordered.map(({ layer, depth }) => {
           const Icon = LAYER_TYPE_ICON[layer.type];
           const active = layer.id === activeLayerId;
           const inSelection = selected.includes(layer.id);
@@ -455,7 +449,7 @@ export function LayersPanel({
                 );
               })()}
 
-              {expanded && !panelCollapsed && (
+              {expanded && (
                 <div className="px-3 pb-2.5 pt-0.5 flex flex-col gap-2 border-t border-hairline/60 mx-2">
                   {!layer.isBackground && (
                     <>

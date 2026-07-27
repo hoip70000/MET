@@ -10,6 +10,11 @@ interface StudioPanelProps {
   bodyClassName?: string;
   /** Opt out of the default body padding/scroll for panels that manage their own (e.g. lists). */
   bare?: boolean;
+  /** Hides just the title text — for when an outer wrapper (CollapsiblePanel, in the right-column
+   *  panel stack) already shows the panel's name in its own header, so this one doesn't repeat it.
+   *  The header row itself still renders if there are `actions` to show; otherwise it's skipped
+   *  entirely rather than leaving a blank strip. */
+  hideTitle?: boolean;
 }
 
 /**
@@ -22,15 +27,19 @@ interface StudioPanelProps {
  * Note this renders no border of its own — the dock region already draws the
  * edge, and stacking both was the source of the double-border seams.
  */
-export function StudioPanel({ title, actions, children, bodyClassName, bare }: StudioPanelProps) {
+export function StudioPanel({ title, actions, children, bodyClassName, bare, hideTitle }: StudioPanelProps) {
   return (
     <div className="flex flex-col h-full min-h-0">
-      <div className="flex items-center justify-between gap-2 px-3 h-10 shrink-0 border-b border-hairline/70">
-        <span className="text-micro font-display font-semibold text-ink-faint uppercase tracking-wider truncate">
-          {title}
-        </span>
-        {actions && <div className="flex items-center gap-0.5 shrink-0">{actions}</div>}
-      </div>
+      {(!hideTitle || actions) && (
+        <div className="flex items-center justify-between gap-2 px-3 h-10 shrink-0 border-b border-hairline/70">
+          {!hideTitle && (
+            <span className="text-micro font-display font-semibold text-ink-faint uppercase tracking-wider truncate">
+              {title}
+            </span>
+          )}
+          {actions && <div className="flex items-center gap-0.5 shrink-0">{actions}</div>}
+        </div>
+      )}
       <div
         className={cn(
           'flex-1 min-h-0 overflow-y-auto',

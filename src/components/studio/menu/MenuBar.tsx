@@ -42,7 +42,7 @@ export function MenuBar({ menus }: MenuBarProps) {
             {menu.label}
           </button>
           {openId === menu.id && (
-            <Menu menu={menu} onItemClick={(action) => { action?.(); setOpenId(null); }} />
+            <Menu items={menu.items} onItemClick={(action) => { action?.(); setOpenId(null); }} />
           )}
         </div>
       ))}
