@@ -213,20 +213,24 @@ export async function listReactions(teamId: string, messageTable: 'team_messages
   return (data as MessageReaction[]) ?? [];
 }
 
-export async function toggleReaction(teamId: string, messageTable: 'team_messages' | 'direct_messages', messageId: string, emoji: string): Promise<void> {
+/** Returns an error string on failure (rather than swallowing it) so callers can roll back an
+ *  optimistic local toggle — see the two ChatThread components in TeamsPanel.tsx, which apply
+ *  the reaction locally before this round-trip resolves rather than waiting on it. */
+export async function toggleReaction(teamId: string, messageTable: 'team_messages' | 'direct_messages', messageId: string, emoji: string): Promise<string | null> {
   const { data: userData } = await supabase.auth.getUser();
   const userId = userData.user?.id;
-  if (!userId) return;
+  if (!userId) return 'Not signed in.';
   const { data: existing } = await supabase
     .from('message_reactions')
     .select('id')
     .eq('message_id', messageId).eq('user_id', userId).eq('emoji', emoji)
     .maybeSingle();
   if (existing) {
-    await supabase.from('message_reactions').delete().eq('id', existing.id);
-  } else {
-    await supabase.from('message_reactions').insert({ team_id: teamId, message_table: messageTable, message_id: messageId, user_id: userId, emoji });
+    const { error } = await supabase.from('message_reactions').delete().eq('id', existing.id);
+    return error ? error.message : null;
   }
+  const { error } = await supabase.from('message_reactions').insert({ team_id: teamId, message_table: messageTable, message_id: messageId, user_id: userId, emoji });
+  return error ? error.message : null;
 }
 
 export function subscribeToReactions(teamId: string, onChange: () => void): () => void {

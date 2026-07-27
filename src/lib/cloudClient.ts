@@ -670,6 +670,25 @@ export function useCloudClient() {
     }
   };
 
+  // Silent counterpart to downloadTaskAttachment — no save-as prompt, no toast, just the
+  // bytes as a blob URL. Used to auto-fetch+preview a photo/voice-message chat attachment
+  // inline in the bubble the moment it renders, rather than making the recipient click a
+  // generic "Attachment" download link the way an arbitrary file attachment still does.
+  const fetchAttachmentBlobUrl = async (channelId: string, msgId: number, mimeType?: string): Promise<string | null> => {
+    if (!client || !channelId) return null;
+    try {
+      const msgs = await client.getMessages(channelId, { ids: [msgId] });
+      const msg = msgs[0];
+      if (!msg) return null;
+      const buffer = await client.downloadMedia(msg);
+      if (!buffer) return null;
+      return window.URL.createObjectURL(new Blob([buffer], mimeType ? { type: mimeType } : undefined));
+    } catch (err) {
+      console.error('Failed to fetch attachment for inline preview', err);
+      return null;
+    }
+  };
+
   // ---------------------------------------------------------------------
   // Team Files: browse/upload an arbitrary channel (the team's shared
   // Telegram channel) rather than the user's own personal cloud channel.
@@ -948,6 +967,7 @@ export function useCloudClient() {
 
     uploadTaskAttachment,
     downloadTaskAttachment,
+    fetchAttachmentBlobUrl,
 
     fetchChannelFiles,
     createChannelFolder,
