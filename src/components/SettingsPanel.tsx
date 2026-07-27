@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Sun, Moon, Laptop, Trash2, Info, ShieldCheck, FileText, ImagePlus, Save, LogOut, Download, CloudUpload, Archive } from 'lucide-react';
+import { Sun, Moon, Laptop, Trash2, Info, ShieldCheck, FileText, ImagePlus, Save, LogOut, Download, CloudUpload, Archive, Eraser } from 'lucide-react';
 import { clear } from 'idb-keyval';
 import { useTheme, type ThemeMode } from '../contexts/ThemeContext';
 import { GlassCard, Button, Input } from './ui';
@@ -11,6 +11,7 @@ import { requestNotificationPermission } from '../lib/notifications';
 import { Bell } from 'lucide-react';
 import { AdminAnnouncementsPanel } from './AdminAnnouncementsPanel';
 import { isAllowedAnnouncementSender } from '../lib/adminMessages';
+import { loadMagicEraseServer, saveMagicEraseServer } from '../lib/magicEraseStore';
 
 interface SettingsPanelProps {
   onShowPrivacy: () => void;
@@ -51,6 +52,20 @@ export function SettingsPanel({
   const [notifPermission, setNotifPermission] = useState<NotificationPermission | null>(
     typeof Notification !== 'undefined' ? Notification.permission : null
   );
+
+  const [magicEraseServer, setMagicEraseServer] = useState('');
+  const [savingMagicErase, setSavingMagicErase] = useState(false);
+
+  useEffect(() => {
+    loadMagicEraseServer().then(setMagicEraseServer);
+  }, []);
+
+  const handleSaveMagicEraseServer = async () => {
+    setSavingMagicErase(true);
+    await saveMagicEraseServer(magicEraseServer);
+    setSavingMagicErase(false);
+    swalToast({ icon: 'success', title: 'Magic Erase server saved' });
+  };
 
   const handleEnableNotifications = async () => {
     const result = await requestNotificationPermission();
@@ -183,6 +198,28 @@ export function SettingsPanel({
           <Button onClick={onBackupAllToCloud} disabled={isBackingUpAll || workspaceCount === 0} className="flex-1">
             {isBackingUpAll ? <Archive size={14} className="animate-pulse" /> : <CloudUpload size={14} />}
             {isBackingUpAll ? 'Backing up...' : isCloudConnected ? 'Backup to Telegram Cloud' : 'Connect & Backup to Telegram'}
+          </Button>
+        </div>
+      </GlassCard>
+
+      <GlassCard className="p-6 space-y-4">
+        <h3 className="text-base font-semibold text-ink font-display flex items-center gap-2">
+          <Eraser size={16} className="text-ink-faint" /> Magic Erase Server
+        </h3>
+        <p className="text-xs text-ink-muted -mt-2">
+          Paste the server address you were given to enable Studio's Magic Erase tool. Studio sends the
+          selected region (and only that region) to this address when you use Magic Erase — nothing is
+          sent otherwise.
+        </p>
+        <div className="flex flex-col sm:flex-row gap-2">
+          <Input
+            placeholder="e.g. your-space.met.server"
+            value={magicEraseServer}
+            onChange={(e) => setMagicEraseServer(e.target.value)}
+            className="flex-1"
+          />
+          <Button onClick={handleSaveMagicEraseServer} disabled={savingMagicErase}>
+            <Save size={14} /> {savingMagicErase ? 'Saving...' : 'Save'}
           </Button>
         </div>
       </GlassCard>
