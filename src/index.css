@@ -143,6 +143,17 @@
 }
 
 @layer utilities {
+  /* A horizontally-scrollable row that hides its scrollbar chrome while keeping real scroll/
+     swipe behavior — for toolbars whose buttons would otherwise overflow or wrap awkwardly on
+     narrow viewports (e.g. Library's search/Import Project/Import ZIP row). */
+  .no-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
   /* Glassmorphism materials, tinted from --color-surface so they read as
      white-based frosted glass in light mode and black-based in dark mode
      from the same rule. */

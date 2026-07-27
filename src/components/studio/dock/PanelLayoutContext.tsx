@@ -6,17 +6,25 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
  * this context only tracks whether the *user* has asked to see them, not whether there's currently
  * anything to show.
  */
-const DEFAULT_ORDER = ['color', 'typer', 'translation', 'layers', 'brushes', 'fonts', 'adjustment', 'text', 'history'];
+const DEFAULT_ORDER = ['color', 'typer', 'magicerase', 'translation', 'layers', 'brushes', 'fonts', 'adjustment', 'text', 'history'];
 
 const DEFAULT_COLLAPSED: Record<string, boolean> = {
-  color: false, typer: false, translation: true, layers: false,
+  color: false, typer: false, magicerase: true, translation: true, layers: false,
   brushes: true, fonts: true, adjustment: true, text: false, history: false,
 };
 
-// Brushes/Fonts/Adjustments start absent (not just collapsed) so Window > "<Panel>" reads as a real
-// on/off toggle — "appears… disappears" — rather than merely expanding something already present.
+// Brushes/Fonts/Adjustments (and now Magic Erase) start absent (not just collapsed) so Window >
+// "<Panel>" reads as a real on/off toggle — "appears… disappears" — rather than merely expanding
+// something already present.
+//
+// Magic Erase was missing from DEFAULT_ORDER entirely until now (not just DEFAULT_VISIBLE) — since
+// PanelStack's visibleOrder is `layout.order.filter(...)`, an id absent from `order` can never
+// render no matter what `visible` says, and loadLayout's migration for existing saved layouts
+// (`parsed.order.filter(id => DEFAULT_ORDER.includes(id))`) only ever backfills ids that are
+// *already* in DEFAULT_ORDER — so this was unreachable for every session, new or existing, until
+// this array itself listed it.
 const DEFAULT_VISIBLE: Record<string, boolean> = {
-  color: true, typer: true, translation: true, layers: true,
+  color: true, typer: true, magicerase: false, translation: true, layers: true,
   brushes: false, fonts: false, adjustment: false, text: false, history: false,
 };
 

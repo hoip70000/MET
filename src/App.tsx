@@ -1027,11 +1027,11 @@ export default function App() {
               {/* Workspace list (root) */}
               {!activeWorkspace && (
                 <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <h2 className="text-lg font-display font-semibold text-ink">My Workspaces</h2>
-                    <div className="flex items-center gap-2">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                    <h2 className="text-lg font-display font-semibold text-ink shrink-0">My Workspaces</h2>
+                    <div className="flex items-center gap-2 overflow-x-auto no-scrollbar -mx-1 px-1 sm:mx-0 sm:px-0">
                       {workspaceSearchOpen ? (
-                        <div className="flex items-center gap-1.5 bg-ink/5 border border-hairline rounded-xl px-2.5 h-8">
+                        <div className="flex items-center gap-1.5 bg-ink/5 border border-hairline rounded-xl px-2.5 h-8 shrink-0">
                           <Search size={14} className="text-ink-faint shrink-0" />
                           <input
                             autoFocus
@@ -1040,12 +1040,12 @@ export default function App() {
                             value={workspaceSearchQuery}
                             onChange={(e) => setWorkspaceSearchQuery(e.target.value)}
                             onKeyDown={(e) => { if (e.key === 'Escape') { setWorkspaceSearchOpen(false); setWorkspaceSearchQuery(''); } }}
-                            className="bg-transparent outline-none text-xs text-ink placeholder:text-ink-faint w-32 sm:w-44"
+                            className="bg-transparent outline-none text-xs text-ink placeholder:text-ink-faint w-28 sm:w-44"
                           />
                           <button
                             onClick={() => { setWorkspaceSearchOpen(false); setWorkspaceSearchQuery(''); }}
                             aria-label="Close search"
-                            className="text-ink-faint hover:text-ink"
+                            className="text-ink-faint hover:text-ink shrink-0"
                           >
                             <X size={13} />
                           </button>
@@ -1055,16 +1055,16 @@ export default function App() {
                           onClick={() => setWorkspaceSearchOpen(true)}
                           aria-label="Search workspaces"
                           title="Search workspaces"
-                          className="p-1.5 rounded-lg hover:bg-ink/10 text-ink-faint hover:text-ink transition-colors"
+                          className="p-1.5 rounded-lg hover:bg-ink/10 text-ink-faint hover:text-ink transition-colors shrink-0"
                         >
                           <Search size={16} />
                         </button>
                       )}
-                      <Button size="sm" variant="secondary" onClick={() => mspImportInputRef.current?.click()}>
+                      <Button size="sm" variant="secondary" className="shrink-0" onClick={() => mspImportInputRef.current?.click()}>
                         <Upload size={14} /> Import Project
                       </Button>
                       <input ref={mspImportInputRef} type="file" accept=".msp" className="hidden" onChange={handleImportMspFile} />
-                      <Button size="sm" variant="secondary" onClick={() => zipImportInputRef.current?.click()}>
+                      <Button size="sm" variant="secondary" className="shrink-0" onClick={() => zipImportInputRef.current?.click()}>
                         <PackagePlus size={14} /> Import ZIP
                       </Button>
                       <input ref={zipImportInputRef} type="file" accept=".zip" className="hidden" onChange={handleImportZipFile} />
