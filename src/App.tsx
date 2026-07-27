@@ -205,12 +205,6 @@ export default function App() {
     return workspaces.filter(w => w.name.toLowerCase().includes(q) || w.tags.some(t => t.toLowerCase().includes(q)));
   })();
 
-  const visibleWorkspaces = (() => {
-    const q = workspaceSearchQuery.trim().toLowerCase();
-    if (!q) return workspaces;
-    return workspaces.filter(w => w.name.toLowerCase().includes(q) || w.tags.some(t => t.toLowerCase().includes(q)));
-  })();
-
   const activeWorkspace = workspaces.find(w => w.id === activeWorkspaceId) || null;
   const mangas = activeWorkspace?.mangas || [];
   const activeManga = mangas.find(m => m.id === activeMangaId) || null;
