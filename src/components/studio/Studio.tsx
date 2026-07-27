@@ -353,6 +353,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
   // it, and typerIndex/typerArmed/etc. above stay exactly where they are regardless of floating vs
   // docked — StudioCanvas reads them for canvas-click placement either way. Persisted the same
   // debounced-localStorage way PanelLayoutContext persists panel order/collapse; Studio.tsx fully unmounts
+  // debounced-localStorage way DockContext persists the active dock tab; Studio.tsx fully unmounts
   // on chapter switch (a fresh mount is a fresh chapter), so a lazy useState initializer is enough —
   // no re-seed-on-chapterId-change effect needed.
   const [typerFloating, setTyperFloating] = useState(() => {
@@ -1584,6 +1585,9 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
   const colorPanel = <ColorPanel hideTitle />;
   const historyPanel = <HistoryPanel hideTitle />;
   const fontsPanel = <FontsPanel onFamiliesChange={setCustomFontFamilies} hideTitle />;
+  const colorPanel = <ColorPanel collapsed={colorPanelCollapsed} onToggleCollapsed={() => setColorPanelCollapsed(v => !v)} />;
+  const historyPanel = <HistoryPanel />;
+  const fontsPanel = <FontsPanel onFamiliesChange={setCustomFontFamilies} />;
 
   // Built once and reused for both the docked-tab render and the floating window — the one place a
   // copy-pasted prop list could quietly drift between the two.
@@ -1629,6 +1633,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     </div>
   ) : (
     <TyperPanel {...typerPanelProps} onPopOut={() => setTyperFloating(true)} hideTitle />
+    <TyperPanel {...typerPanelProps} onPopOut={() => setTyperFloating(true)} />
   );
 
   const translationPanel = (

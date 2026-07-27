@@ -143,6 +143,17 @@ test('dragging a Curves control point brightens the canvas live', async ({ page 
   // free. Scrolling explicitly first, then measuring, makes this robust to exactly how much room
   // collapsing freed up.
   await graph.scrollIntoViewIfNeeded();
+  // The Adjustment section's own content area is short in the default sidebar layout (it shares
+  // the column with Color above and Layers below) — too short to fit the 200px-tall curves graph
+  // without clipping it. Collapsing both hands the whole column to Adjustment instead (the same
+  // chevron toggle a user would reach for), rather than resizing the browser viewport — which
+  // shifts the Stage's own fit-to-screen layout and breaks sampleStageColor's "sample the page's
+  // on-screen center" assumption.
+  await page.getByRole('button', { name: 'Collapse Color panel' }).click();
+  await page.getByRole('button', { name: 'Collapse Layers panel' }).click();
+
+  const graph = page.getByTestId('curves-graph');
+  await graph.waitFor({ state: 'visible' });
   const box = (await graph.boundingBox())!;
 
   // The page is flat grey 128, so clicking the graph's mid-x (input ~128) and raising the output

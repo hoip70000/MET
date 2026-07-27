@@ -63,6 +63,7 @@ export function TyperPanel({
   fontFamilies = FONT_FAMILIES,
   multiBubbleMode, onMultiBubbleModeChange, queuedBubbleCount, onAddBubbleRect, onPlaceAllBubbles,
   onPopOut, hideTitle,
+  onPopOut,
 }: TyperPanelProps) {
   const [editingStyleId, setEditingStyleId] = useState<string | null>(null);
   const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
