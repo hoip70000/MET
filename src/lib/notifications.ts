@@ -46,6 +46,19 @@ export async function markAllRead(): Promise<string | null> {
   return error ? error.message : null;
 }
 
+export async function deleteNotification(id: string): Promise<string | null> {
+  const { error } = await supabase.from('notifications').delete().eq('id', id);
+  return error ? error.message : null;
+}
+
+export async function deleteAllNotifications(): Promise<string | null> {
+  const { data: userData } = await supabase.auth.getUser();
+  const userId = userData.user?.id;
+  if (!userId) return 'Not signed in.';
+  const { error } = await supabase.from('notifications').delete().eq('user_id', userId);
+  return error ? error.message : null;
+}
+
 export async function notify(userId: string, title: string, body = ''): Promise<string | null> {
   const { error } = await supabase.from('notifications').insert({ user_id: userId, title, body });
   return error ? error.message : null;
