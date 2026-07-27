@@ -20,9 +20,13 @@ function newDoc(title = 'Untitled'): TextEditorDoc {
 
 interface TextEditorPageProps {
   onSendToTyper: (script: string) => void;
+  /** Whether a Studio chapter is currently open — Send to TypeR switches the top-level view to
+   *  Library either way, but only actually lands on the Studio (where the script is waiting) if
+   *  one is; the toast wording reflects which case this is instead of always claiming success. */
+  hasActiveChapter: boolean;
 }
 
-export function TextEditorPage({ onSendToTyper }: TextEditorPageProps) {
+export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPageProps) {
   const [docs, setDocs] = useState<TextEditorDoc[]>([]);
   const [activeDocId, setActiveDocId] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -253,7 +257,12 @@ export function TextEditorPage({ onSendToTyper }: TextEditorPageProps) {
       return container.innerText;
     }).join('\n');
     onSendToTyper(text);
-    swalToast({ icon: 'success', title: 'Sent to TypeR — open the Studio to see it waiting there' });
+    swalToast({
+      icon: 'success',
+      title: hasActiveChapter
+        ? 'Sent to TypeR — opening the Studio…'
+        : 'Sent to TypeR — open a chapter in Library to see it waiting there',
+    });
   }
 
   const toolbarButtons = useMemo(() => [
