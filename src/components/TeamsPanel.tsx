@@ -4071,8 +4071,12 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
         )}
         <div className="flex gap-2">
           <input ref={fileInputRef} type="file" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) handleAttach(f); }} />
-          <button type="button" onClick={() => fileInputRef.current?.click()} disabled={attaching} className="p-2 rounded-xl text-ink-faint hover:text-accent hover:bg-accent-soft transition-colors shrink-0">
+          <button type="button" onClick={() => fileInputRef.current?.click()} disabled={attaching} title="Attach file" className="p-2 rounded-xl text-ink-faint hover:text-accent hover:bg-accent-soft transition-colors shrink-0">
             <Paperclip size={16} />
+          </button>
+          <input ref={photoInputRef} type="file" accept="image/*" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) handleAttach(f); }} />
+          <button type="button" onClick={() => photoInputRef.current?.click()} disabled={attaching} title="Send a photo" className="p-2 rounded-xl text-ink-faint hover:text-accent hover:bg-accent-soft transition-colors shrink-0">
+            <ImagePlus size={16} />
           </button>
           <button
             type="button"
@@ -4145,6 +4149,7 @@ function DirectThread({ team, partnerId, partnerName, partnerAvatar, onBack, onO
   const [attaching, setAttaching] = useState(false);
   const { scrollRef, showJumpToEnd, handleScroll, jumpToEnd, pinToBottom } = useChatScroll(messages.length);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const photoInputRef = useRef<HTMLInputElement>(null);
   const { session } = useTeamAuth();
   const myUserId = session?.user.id;
 
@@ -4315,8 +4320,12 @@ function DirectThread({ team, partnerId, partnerName, partnerAvatar, onBack, onO
       )}
       <div className="p-3 border-t border-hairline flex gap-2 shrink-0">
         <input ref={fileInputRef} type="file" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) handleAttach(f); }} />
-        <button type="button" onClick={() => fileInputRef.current?.click()} disabled={attaching} className="p-2 rounded-xl text-ink-faint hover:text-accent hover:bg-accent-soft transition-colors shrink-0">
+        <button type="button" onClick={() => fileInputRef.current?.click()} disabled={attaching} title="Attach file" className="p-2 rounded-xl text-ink-faint hover:text-accent hover:bg-accent-soft transition-colors shrink-0">
           <Paperclip size={16} />
+        </button>
+        <input ref={photoInputRef} type="file" accept="image/*" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) handleAttach(f); }} />
+        <button type="button" onClick={() => photoInputRef.current?.click()} disabled={attaching} title="Send a photo" className="p-2 rounded-xl text-ink-faint hover:text-accent hover:bg-accent-soft transition-colors shrink-0">
+          <ImagePlus size={16} />
         </button>
         <button
           type="button"
