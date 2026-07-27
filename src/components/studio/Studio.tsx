@@ -1748,9 +1748,6 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
   const colorPanel = <ColorPanel hideTitle />;
   const historyPanel = <HistoryPanel hideTitle />;
   const fontsPanel = <FontsPanel onFamiliesChange={setCustomFontFamilies} hideTitle />;
-  const colorPanel = <ColorPanel collapsed={colorPanelCollapsed} onToggleCollapsed={() => setColorPanelCollapsed(v => !v)} />;
-  const historyPanel = <HistoryPanel />;
-  const fontsPanel = <FontsPanel onFamiliesChange={setCustomFontFamilies} />;
 
   // Built once and reused for both the docked-tab render and the floating window — the one place a
   // copy-pasted prop list could quietly drift between the two.
@@ -1796,7 +1793,6 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     </div>
   ) : (
     <TyperPanel {...typerPanelProps} onPopOut={() => setTyperFloating(true)} hideTitle />
-    <TyperPanel {...typerPanelProps} onPopOut={() => setTyperFloating(true)} />
   );
 
   const translationPanel = (
