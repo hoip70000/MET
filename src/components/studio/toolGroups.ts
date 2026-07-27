@@ -102,10 +102,19 @@ export const STUDIO_TOOL_GROUPS: StudioToolGroup[] = [
     ],
   },
   { id: 'liquify', tools: [{ id: 'liquify', label: 'Liquify', icon: Wind, enabled: true }] },
-  // Paints a scratch mask (reuses Quick Mask's paint-any-tool-onto-an-alpha-buffer machinery — see
-  // Studio.tsx) rather than owning a separate one; picking this tool is just a labeled shortcut into
-  // that same mechanism, tuned for marking an area to send to Magic Erase instead of a selection.
-  { id: 'magic-erase', tools: [{ id: 'magic-erase', label: 'Magic Erase', icon: Sparkles, enabled: true }] },
+  // Magic Tools: a home for AI/server-backed tools, distinct from the plain local filters above.
+  // Magic Erase paints a scratch mask (reuses Quick Mask's paint-any-tool-onto-an-alpha-buffer
+  // machinery — see Studio.tsx) rather than owning a separate one; picking it is just a labeled
+  // shortcut into that same mechanism, tuned for marking an area to send to Magic Erase instead of
+  // a selection. Groups have no label of their own in this app's UI (see StudioToolGroup) — the rail
+  // icon and tooltip always come from whichever tool inside is active/remembered — so a future
+  // second magic tool would slot in here as another sibling, same as Marquee/Lasso/Healing above.
+  {
+    id: 'magic-tools', groupStart: true,
+    tools: [
+      { id: 'magic-erase', label: 'Magic Erase', icon: Sparkles, enabled: true },
+    ],
+  },
 
   {
     id: 'pen', groupStart: true,
