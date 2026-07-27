@@ -21,7 +21,7 @@ import {
   createTeam, getMyOwnedTeam, getMyMembership, getPendingInvitesForMe,
   inviteMember, acceptInvite, declineInvite, listTeamMembers, updateMemberFields,
   promoteToLeader, demoteToMember, removeMember, getLeaderboard,
-  updateTeamSettings, deleteTeam, broadcastToTeam, updateMyNotificationPrefs, updateMyPrivacyPrefs,
+  updateTeamSettings, deleteTeam, broadcastToTeam, updateMyNotificationPrefs, updateMyNotificationCategory, updateMyPrivacyPrefs,
   setMemberVerified, listMyMemberships, getActiveTeamId, setActiveTeamId,
   TeamCustomPermissionDef, TeamCustomPermissionGrant,
   listCustomPermissionDefs, createCustomPermissionDef, deleteCustomPermissionDef,
@@ -553,28 +553,76 @@ function TeamActivityFeed({ team }: { team: Team }) {
 }
 
 function MyNotificationPrefsCard({ team, myMember, onChanged }: { team: Team; myMember: TeamMember; onChanged: () => void }) {
-  const prefs = { broadcasts: true, tasks: true, chat: true, ...myMember.notification_prefs };
+  const prefs = myMember.notification_prefs ?? {};
+  const chat = { mode: 'all' as const, channel: 'in_app' as const, ...prefs.chat };
+  const tasks = { enabled: true, channel: 'in_app' as const, ...prefs.tasks };
 
-  const handleToggle = async (key: 'broadcasts' | 'tasks' | 'chat', value: boolean) => {
-    const next = { ...prefs, [key]: value };
-    const error = await updateMyNotificationPrefs(team.id, next);
+  const handleToggleBroadcasts = async (value: boolean) => {
+    const error = await updateMyNotificationPrefs(team.id, { broadcasts: value });
+    if (error) { swal({ icon: 'error', title: 'Could not save', text: error }); return; }
+    onChanged();
+  };
+
+  const handleChatPatch = async (patch: Partial<typeof chat>) => {
+    const error = await updateMyNotificationCategory(team.id, 'chat', patch);
+    if (error) { swal({ icon: 'error', title: 'Could not save', text: error }); return; }
+    onChanged();
+  };
+
+  const handleTasksPatch = async (patch: Partial<typeof tasks>) => {
+    const error = await updateMyNotificationCategory(team.id, 'tasks', patch);
     if (error) { swal({ icon: 'error', title: 'Could not save', text: error }); return; }
     onChanged();
   };
 
   return (
-    <GlassCard className="p-6 space-y-3">
+    <GlassCard className="p-6 space-y-4">
       <h3 className="text-sm font-semibold text-ink">My Notifications</h3>
-      {([
-        ['broadcasts', 'Team broadcasts'],
-        ['tasks', 'New task assignments'],
-        ['chat', 'Chat messages'],
-      ] as const).map(([key, label]) => (
-        <div key={key} className="flex items-center justify-between">
-          <span className="text-sm text-ink-muted">{label}</span>
-          <Switch checked={prefs[key] !== false} onChange={v => handleToggle(key, v)} />
+
+      <div className="flex items-center justify-between">
+        <span className="text-sm text-ink-muted">Team broadcasts</span>
+        <Switch checked={prefs.broadcasts !== false} onChange={handleToggleBroadcasts} />
+      </div>
+
+      <div className="space-y-2 border-t border-hairline pt-3">
+        <div className="flex items-center justify-between">
+          <span className="text-sm text-ink-muted">Chat messages</span>
+          <div className="flex items-center gap-1.5">
+            <select
+              className="text-xs rounded-lg border border-hairline bg-ink/5 px-2 py-1 text-ink"
+              value={chat.mode}
+              onChange={e => handleChatPatch({ mode: e.target.value as 'all' | 'mentions_dms' })}
+            >
+              <option value="all">Every message</option>
+              <option value="mentions_dms">Mentions &amp; DMs only</option>
+            </select>
+            <select
+              className="text-xs rounded-lg border border-hairline bg-ink/5 px-2 py-1 text-ink"
+              value={chat.channel}
+              onChange={e => handleChatPatch({ channel: e.target.value as 'in_app' | 'in_app_push' })}
+            >
+              <option value="in_app">In-app only</option>
+              <option value="in_app_push">In-app + Web</option>
+            </select>
+          </div>
         </div>
-      ))}
+
+        <div className="flex items-center justify-between">
+          <span className="text-sm text-ink-muted">Task assignments</span>
+          <div className="flex items-center gap-1.5">
+            <Switch checked={tasks.enabled !== false} onChange={v => handleTasksPatch({ enabled: v })} />
+            <select
+              className="text-xs rounded-lg border border-hairline bg-ink/5 px-2 py-1 text-ink disabled:opacity-40"
+              value={tasks.channel}
+              disabled={tasks.enabled === false}
+              onChange={e => handleTasksPatch({ channel: e.target.value as 'in_app' | 'in_app_push' })}
+            >
+              <option value="in_app">In-app only</option>
+              <option value="in_app_push">In-app + Web</option>
+            </select>
+          </div>
+        </div>
+      </div>
     </GlassCard>
   );
 }
@@ -3515,14 +3563,17 @@ function upsertById<T extends { id: string }>(list: T[], item: T): T[] {
 const QUICK_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🎉'];
 const EMPTY_REACTIONS: MessageReaction[] = [];
 
+// Adding a *new* reaction now happens from the bubble's long-press/right-click menu (a quick-emoji
+// row up top, see ChatBubbleMenu.tsx) rather than a "+" button here — this bar is just the
+// already-placed reaction chips, still clickable to toggle your own.
 function ReactionBar({ reactions, myUserId, onToggle }: { reactions: MessageReaction[]; myUserId: string | undefined; onToggle: (emoji: string) => void }) {
-  const [pickerOpen, setPickerOpen] = useState(false);
   const grouped = new Map<string, MessageReaction[]>();
   for (const r of reactions) {
     const list = grouped.get(r.emoji) ?? [];
     list.push(r);
     grouped.set(r.emoji, list);
   }
+  if (grouped.size === 0) return null;
   return (
     <div className="flex items-center gap-1 flex-wrap mt-1">
       {Array.from(grouped.entries()).map(([emoji, list]) => (
@@ -3537,16 +3588,6 @@ function ReactionBar({ reactions, myUserId, onToggle }: { reactions: MessageReac
           {emoji} {list.length}
         </button>
       ))}
-      <div className="relative">
-        <button type="button" onClick={() => setPickerOpen(o => !o)} className="text-[11px] px-1.5 py-0.5 rounded-full border border-hairline text-ink-faint hover:border-accent/40">+</button>
-        {pickerOpen && (
-          <div className="absolute z-10 top-full left-0 mt-1 flex gap-1 p-1.5 rounded-xl bg-surface border border-hairline shadow-lg">
-            {QUICK_EMOJIS.map(e => (
-              <button key={e} type="button" onClick={() => { onToggle(e); setPickerOpen(false); }} className="text-sm hover:scale-125 transition-transform">{e}</button>
-            ))}
-          </div>
-        )}
-      </div>
     </div>
   );
 }
@@ -3593,6 +3634,11 @@ const TeamMessageBubble = memo(function TeamMessageBubble({ message, replied, is
     !m.deleted && canManage && { key: 'pin', label: m.pinned ? 'Unpin' : 'Pin', icon: m.pinned ? <ChatBubbleIcons.PinOff size={13} /> : <ChatBubbleIcons.Pin size={13} />, onSelect: () => onPin(m.id, !m.pinned) },
     !m.deleted && (isMine || canManage) && { key: 'delete', label: 'Delete', icon: <ChatBubbleIcons.Delete size={13} />, danger: true, onSelect: () => onDelete(m.id) },
   ].filter(Boolean) as { key: string; label: string; icon: React.ReactNode; danger?: boolean; onSelect: () => void }[];
+  const bubbleReactions = () => m.deleted ? [] : QUICK_EMOJIS.map(emoji => ({
+    emoji,
+    active: reactions.some(r => r.emoji === emoji && r.user_id === myUserId),
+    onSelect: () => onToggleReaction(teamId, 'team_messages', m.id, emoji),
+  }));
 
   return (
     <div className={`flex items-start gap-2 max-w-md group animate-fade-in-up ${isMine ? 'ml-auto flex-row-reverse' : ''}`}>
@@ -3601,7 +3647,7 @@ const TeamMessageBubble = memo(function TeamMessageBubble({ message, replied, is
       </button>
       <div className="min-w-0 flex-1">
         <div
-          {...bind(bubbleActions)}
+          {...bind(bubbleActions, bubbleReactions)}
           className={`p-2.5 rounded-2xl min-w-0 backdrop-blur-sm shadow-sm transition-all duration-200 select-none ${isMine ? 'bg-gradient-to-br from-accent-soft to-accent-soft/60 rounded-tr-sm' : 'bg-gradient-to-br from-ink/[0.04] to-ink/[0.02] rounded-tl-sm'}`}
         >
           <div className={`flex items-center gap-2 ${isMine ? 'flex-row-reverse' : ''}`}>
@@ -3678,6 +3724,11 @@ const DirectMessageBubble = memo(function DirectMessageBubble({ message, replied
     !m.deleted && !isMine && { key: 'report', label: 'Report to Admin', icon: <ChatBubbleIcons.Report size={13} />, onSelect: () => onReport(m) },
     !m.deleted && isMine && { key: 'delete', label: 'Delete', icon: <ChatBubbleIcons.Delete size={13} />, danger: true, onSelect: () => onDelete(m.id) },
   ].filter(Boolean) as { key: string; label: string; icon: React.ReactNode; danger?: boolean; onSelect: () => void }[];
+  const bubbleReactions = () => m.deleted ? [] : QUICK_EMOJIS.map(emoji => ({
+    emoji,
+    active: reactions.some(r => r.emoji === emoji && r.user_id === myUserId),
+    onSelect: () => onToggleReaction(teamId, 'direct_messages', m.id, emoji),
+  }));
 
   return (
     <div className={`flex items-end gap-2 max-w-md group ${isMine ? 'ml-auto flex-row-reverse' : ''}`}>
@@ -3688,7 +3739,7 @@ const DirectMessageBubble = memo(function DirectMessageBubble({ message, replied
         )}
       </div>
       <div className="min-w-0">
-        <div {...bind(bubbleActions)} className={`p-2.5 rounded-2xl min-w-0 backdrop-blur-sm shadow-sm transition-all duration-200 select-none animate-fade-in-up ${!isMine ? 'bg-gradient-to-br from-ink/[0.04] to-ink/[0.02] rounded-bl-sm' : 'bg-gradient-to-br from-accent-soft to-accent-soft/60 rounded-br-sm'}`}>
+        <div {...bind(bubbleActions, bubbleReactions)} className={`p-2.5 rounded-2xl min-w-0 backdrop-blur-sm shadow-sm transition-all duration-200 select-none animate-fade-in-up ${!isMine ? 'bg-gradient-to-br from-ink/[0.04] to-ink/[0.02] rounded-bl-sm' : 'bg-gradient-to-br from-accent-soft to-accent-soft/60 rounded-br-sm'}`}>
           <div className="flex items-center gap-1.5 justify-end mb-0.5">
             {m.edited_at && !m.deleted && <span className="text-[9px] text-ink-faint">(edited)</span>}
             <span className="text-[9px] text-ink-faint">{formatMessageTime(m.created_at)}</span>
@@ -3881,7 +3932,9 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
     }
     const others = members.filter(m => m.status === 'active' && m.user_id && m.user_id !== myUserId && !mentioned.includes(m.user_id!));
     for (const m of others) {
-      if (m.notification_prefs?.chat !== false) notify(m.user_id!, `New message in ${team.name}`, text.slice(0, 80));
+      // Default mode is "all" (every message) — only "mentions_dms" opts out of this
+      // team-wide fan-out, since mentions themselves are notified above regardless of mode.
+      if (m.notification_prefs?.chat?.mode !== 'mentions_dms') notify(m.user_id!, `New message in ${team.name}`, text.slice(0, 80));
     }
   };
 

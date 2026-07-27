@@ -265,7 +265,7 @@ export function SettingsPanel({
                       onChange={e => updateCategoryPref(category, { channel: e.target.value as NotifyChannel })}
                     >
                       <option value="in_app">In-app only</option>
-                      <option value="in_app_push">In-app + Push</option>
+                      <option value="in_app_push">In-app + Web</option>
                     </select>
                   </div>
                 </div>
