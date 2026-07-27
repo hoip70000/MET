@@ -21,6 +21,8 @@ interface BrushesPanelProps {
     pressureSize: boolean; pressureOpacity: boolean;
   };
   onLiveChange: (patch: Partial<BrushesPanelProps['live']>) => void;
+  /** Set when hosted inside the right-column panel stack, whose own header already shows the name. */
+  hideTitle?: boolean;
 }
 
 function Row({ label, value, min, max, step = 1, onChange, format }: {
@@ -85,7 +87,7 @@ function BrushTile({ preset, mask, color, active, onSelect, onMenu, onToggleFav 
   );
 }
 
-export function BrushesPanel({ color, activeBrushId, onSelectBrush, live, onLiveChange }: BrushesPanelProps) {
+export function BrushesPanel({ color, activeBrushId, onSelectBrush, live, onLiveChange, hideTitle }: BrushesPanelProps) {
   const [presets, setPresets] = useState<BrushPreset[]>([]);
   const [query, setQuery] = useState('');
   const [openFolders, setOpenFolders] = useState<Record<string, boolean>>({ Favorites: true, Basic: true });
@@ -246,6 +248,7 @@ export function BrushesPanel({ color, activeBrushId, onSelectBrush, live, onLive
   return (
     <StudioPanel
       title="Brushes"
+      hideTitle={hideTitle}
       actions={
         <>
           <IconButton size="sm" aria-label="Import brushes" title="Import image(s) as brush tips" onClick={() => importRef.current?.click()} className="!bg-transparent">

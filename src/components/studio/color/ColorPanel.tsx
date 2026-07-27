@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { RotateCcw, ArrowLeftRight, Plus, Trash2, ChevronUp, ChevronDown } from 'lucide-react';
+import { RotateCcw, ArrowLeftRight, Plus, Trash2 } from 'lucide-react';
 import { colord, extend } from 'colord';
 import cmykPlugin from 'colord/plugins/cmyk';
 import { IconButton, Input } from '../../ui';
@@ -13,13 +13,12 @@ extend([cmykPlugin]);
 const SV_SIZE = 160;
 
 interface ColorPanelProps {
-  /** When it's docked in the persistent Color+Layers column, the wrapper controls the collapse
-   *  height — this just renders the toggle button in the header's actions slot. */
-  collapsed?: boolean;
-  onToggleCollapsed?: () => void;
+  /** Set when hosted inside the right-column panel stack, whose own header already shows the name
+   *  and owns the collapse chevron (CollapsiblePanel) — this used to render its own chevron here. */
+  hideTitle?: boolean;
 }
 
-export function ColorPanel({ collapsed, onToggleCollapsed }: ColorPanelProps = {}) {
+export function ColorPanel({ hideTitle }: ColorPanelProps = {}) {
   const {
     foreground, background, recent, setForeground, setBackground, swap, reset,
     palettes, activePaletteId, setActivePaletteId, createPalette, deletePalette, addSwatch, removeSwatch,
@@ -94,17 +93,11 @@ export function ColorPanel({ collapsed, onToggleCollapsed }: ColorPanelProps = {
   return (
     <StudioPanel
       title="Color"
+      hideTitle={hideTitle}
       actions={
-        <>
-          <IconButton size="sm" aria-label="Reset colors" title="Reset to black/white" onClick={reset} className="!bg-transparent">
-            <RotateCcw size={13} />
-          </IconButton>
-          {onToggleCollapsed && (
-            <IconButton size="sm" aria-label={collapsed ? 'Expand Color panel' : 'Collapse Color panel'} onClick={onToggleCollapsed} className="!bg-transparent">
-              {collapsed ? <ChevronDown size={13} /> : <ChevronUp size={13} />}
-            </IconButton>
-          )}
-        </>
+        <IconButton size="sm" aria-label="Reset colors" title="Reset to black/white" onClick={reset} className="!bg-transparent">
+          <RotateCcw size={13} />
+        </IconButton>
       }
     >
         <div className="flex items-center gap-3">

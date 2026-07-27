@@ -122,6 +122,27 @@ test('dragging a Curves control point brightens the canvas live', async ({ page 
   await page.getByRole('button', { name: 'Add adjustment layer' }).click();
   await page.getByRole('combobox', { name: 'Type' }).selectOption({ label: 'Curves' });
 
+  // The Adjustment panel shares one scrolling column with every other panel in the stack — too
+  // little room by default to fit the 200px-tall curves graph without it running off-screen.
+  // Collapsing the others hands the column to Adjustment instead (the same chevron toggle a user
+  // would reach for), rather than resizing the browser viewport — which shifts the Stage's own
+  // fit-to-screen layout and breaks sampleStageColor's "sample the page's on-screen center"
+  // assumption. TypeR is included here because, unlike the old single-active-tab dock this panel
+  // stack replaced, it now stays visible and expanded alongside Adjustment instead of being hidden
+  // by the tab switch.
+  await page.getByRole('button', { name: 'Collapse Color panel' }).click();
+  await page.getByRole('button', { name: 'Collapse Layers panel' }).click();
+  await page.getByRole('button', { name: 'Collapse TypeR panel' }).click();
+
+  const graph = page.getByTestId('curves-graph');
+  await graph.waitFor({ state: 'visible' });
+  // Collapsing the panels above frees room, but doesn't guarantee the graph lands inside the
+  // *current* scroll position of the stack's own scrolling column — a raw `page.mouse.click(x,y)`
+  // (needed below, since it targets a specific point on the diagonal line, not just "the element")
+  // bypasses Playwright's usual auto-scroll-into-view safety net that `locator.click()` gets for
+  // free. Scrolling explicitly first, then measuring, makes this robust to exactly how much room
+  // collapsing freed up.
+  await graph.scrollIntoViewIfNeeded();
   // The Adjustment section's own content area is short in the default sidebar layout (it shares
   // the column with Color above and Layers below) — too short to fit the 200px-tall curves graph
   // without clipping it. Collapsing both hands the whole column to Adjustment instead (the same

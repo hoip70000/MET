@@ -805,6 +805,7 @@ export default function App() {
                   pendingTyperScript={pendingTyperScript}
                   onConsumePendingTyperScript={() => setPendingTyperScript(null)}
                   onPagesChange={handleChapterPagesChange}
+                  onExportMsp={() => handleExportWorkspace(activeWorkspace)}
                 />
               )}
 

@@ -10,7 +10,7 @@ import {
   type TextStyle, type TextStyleKind,
 } from '../../lib/textStyleStore';
 import { FONT_FAMILIES, DEFAULT_TEXT_SHADOW, DEFAULT_TEXT_GRADIENT, type StudioLayer, type TextAlign, type TextLayerData, type LineStyleOverride } from './studioTypes';
-import { applyToRange, resolveRunStyle, runAt, styleOverRange, type ResolvedRunStyle, type RunStylePatch } from './textRuns';
+import { applyCharPatch, resolveCharValue, type ResolvedRunStyle, type RunStylePatch } from './textRuns';
 import type { TextSelection } from './StudioCanvas';
 
 interface TextPanelProps {
@@ -23,15 +23,13 @@ interface TextPanelProps {
   selection?: TextSelection | null;
   /** Wrapped-line index selected on canvas (click a line while the layer is selected, not editing). */
   selectedLineIndex?: number | null;
+  /** Set when hosted inside the right-column panel stack, whose own header already shows the name. */
+  hideTitle?: boolean;
 }
 
 const FONT_WEIGHTS = [100, 200, 300, 400, 500, 600, 700, 800, 900];
 
-/** Character properties that also exist as a layer default. The rest (kerning, baseline shift,
- *  explicit weight) only exist per-run, so with no selection they're written across every run. */
-const LAYER_BACKED_CHAR_KEYS = new Set(['fontFamily', 'fontSize', 'color', 'bold', 'italic', 'letterSpacing']);
-
-export function TextPanel({ layer, onUpdate, onCenter, fontFamilies = FONT_FAMILIES, selection = null, selectedLineIndex = null }: TextPanelProps) {
+export function TextPanel({ layer, onUpdate, onCenter, fontFamilies = FONT_FAMILIES, selection = null, selectedLineIndex = null, hideTitle }: TextPanelProps) {
   const [styles, setStyles] = useState<TextStyle[]>([]);
   const [openGroups, setOpenGroups] = useState<Record<TextStyleKind, boolean>>({ character: true, paragraph: false });
 
@@ -91,45 +89,20 @@ export function TextPanel({ layer, onUpdate, onCenter, fontFamilies = FONT_FAMIL
 
   const set = (patch: Partial<TextLayerData>) => onUpdate(layer.id, patch);
 
-  const runs = text.runs ?? [];
   const range = selection && selection.end > selection.start ? selection : null;
 
   // What the character controls should display: the value shared across the selection, falling back
   // to the run at its start when the range is mixed (showing the layer default there would claim a
   // value the selection doesn't actually have).
-  const anchor = range ? resolveRunStyle(text, runAt(text.content, runs, range.start)) : resolveRunStyle(text);
-  const shared: RunStylePatch = range ? styleOverRange(text.content, runs, range.start, range.end) : {};
-  const charValue = <K extends keyof ResolvedRunStyle>(key: K): ResolvedRunStyle[K] =>
-    ((shared as Partial<ResolvedRunStyle>)[key] ?? anchor[key]) as ResolvedRunStyle[K];
+  const charValue = <K extends keyof ResolvedRunStyle>(key: K): ResolvedRunStyle[K] => resolveCharValue(text, range, key);
 
   /**
    * Applies a character property. With a range selected it writes run overrides for just that
    * range; with no range it applies to the whole layer — which is what Photoshop's Character panel
-   * does when the layer rather than a range is selected.
+   * does when the layer rather than a range is selected. Shared with the Text menu's actions
+   * (Studio.tsx) via `applyCharPatch` so the two can't drift.
    */
-  const setChar = (patch: RunStylePatch) => {
-    if (range) {
-      set({ runs: applyToRange(text.content, runs, range.start, range.end, patch) });
-      return;
-    }
-    const layerPatch: Partial<TextLayerData> = {};
-    const runOnly: RunStylePatch = {};
-    const clear: RunStylePatch = {};
-    for (const [key, value] of Object.entries(patch)) {
-      if (LAYER_BACKED_CHAR_KEYS.has(key)) {
-        (layerPatch as Record<string, unknown>)[key] = value;
-        // Clear any run override of this key, or the new layer default would be masked by runs and
-        // the control would look broken.
-        (clear as Record<string, unknown>)[key] = undefined;
-      } else {
-        (runOnly as Record<string, unknown>)[key] = value;
-      }
-    }
-    let next = runs;
-    if (Object.keys(clear).length) next = applyToRange(text.content, next, 0, text.content.length, clear);
-    if (Object.keys(runOnly).length) next = applyToRange(text.content, next, 0, text.content.length, runOnly);
-    set({ ...layerPatch, runs: next });
-  };
+  const setChar = (patch: RunStylePatch) => set(applyCharPatch(text, range, patch));
 
   // A selected line's controls show its own override where set, falling back to the layer default
   // — not a resolved per-run style, since a line can span several differently-styled runs and there's
@@ -153,6 +126,7 @@ export function TextPanel({ layer, onUpdate, onCenter, fontFamilies = FONT_FAMIL
   return (
     <StudioPanel
       title="Text"
+      hideTitle={hideTitle}
       actions={
         <IconButton size="sm" aria-label="Center horizontally" title="Center in bubble" onClick={() => onCenter(layer.id)} className="!bg-transparent">
           <AlignCenterHorizontal size={14} />
