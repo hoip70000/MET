@@ -385,8 +385,8 @@ function DashboardSection({ team, myMember, canManage, members, onChanged }: { t
         </GlassCard>
       )}
 
-      {myMember && <MyNotificationPrefsCard team={team} myMember={myMember} onChanged={onChanged} />}
-      {myMember && <MyPrivacyPrefsCard team={team} myMember={myMember} onChanged={onChanged} />}
+      {myMember && <MyNotificationPrefsCard team={team} myMember={myMember} />}
+      {myMember && <MyPrivacyPrefsCard team={team} myMember={myMember} />}
 
       {myMember && <MyJobsCard team={team} />}
 
@@ -551,27 +551,44 @@ function TeamActivityFeed({ team }: { team: Team }) {
   );
 }
 
-function MyNotificationPrefsCard({ team, myMember, onChanged }: { team: Team; myMember: TeamMember; onChanged: () => void }) {
-  const prefs = myMember.notification_prefs ?? {};
+// Deliberately self-contained: this used to take the same `onChanged` callback every other
+// team-data-mutating action does, which refetches/re-renders the *entire* team dashboard
+// (members, tasks, wallet, everything) for what's actually a small, purely personal
+// preference flip — visibly janky for something this low-stakes. It now holds its own local
+// state and applies each change optimistically (update locally, save in the background, roll
+// back only on a real failure), so toggling an option never touches anything outside this card.
+function MyNotificationPrefsCard({ team, myMember }: { team: Team; myMember: TeamMember }) {
+  const [prefs, setPrefs] = useState(myMember.notification_prefs ?? {});
   const chat = { mode: 'all' as const, channel: 'in_app' as const, ...prefs.chat };
   const tasks = { enabled: true, channel: 'in_app' as const, ...prefs.tasks };
 
   const handleToggleBroadcasts = async (value: boolean) => {
+    setPrefs(p => ({ ...p, broadcasts: value }));
     const error = await updateMyNotificationPrefs(team.id, { broadcasts: value });
-    if (error) { swal({ icon: 'error', title: 'Could not save', text: error }); return; }
-    onChanged();
+    if (error) {
+      swal({ icon: 'error', title: 'Could not save', text: error });
+      setPrefs(p => ({ ...p, broadcasts: !value }));
+    }
   };
 
   const handleChatPatch = async (patch: Partial<typeof chat>) => {
+    const previous = prefs.chat;
+    setPrefs(p => ({ ...p, chat: { ...p.chat, ...patch } }));
     const error = await updateMyNotificationCategory(team.id, 'chat', patch);
-    if (error) { swal({ icon: 'error', title: 'Could not save', text: error }); return; }
-    onChanged();
+    if (error) {
+      swal({ icon: 'error', title: 'Could not save', text: error });
+      setPrefs(p => ({ ...p, chat: previous }));
+    }
   };
 
   const handleTasksPatch = async (patch: Partial<typeof tasks>) => {
+    const previous = prefs.tasks;
+    setPrefs(p => ({ ...p, tasks: { ...p.tasks, ...patch } }));
     const error = await updateMyNotificationCategory(team.id, 'tasks', patch);
-    if (error) { swal({ icon: 'error', title: 'Could not save', text: error }); return; }
-    onChanged();
+    if (error) {
+      swal({ icon: 'error', title: 'Could not save', text: error });
+      setPrefs(p => ({ ...p, tasks: previous }));
+    }
   };
 
   return (
@@ -626,14 +643,19 @@ function MyNotificationPrefsCard({ team, myMember, onChanged }: { team: Team; my
   );
 }
 
-function MyPrivacyPrefsCard({ team, myMember, onChanged }: { team: Team; myMember: TeamMember; onChanged: () => void }) {
-  const prefs = { hide_status: false, hide_balance: false, hide_active: false, ...myMember.privacy_prefs };
+// Same self-contained/optimistic treatment as MyNotificationPrefsCard above, for the same reason.
+function MyPrivacyPrefsCard({ team, myMember }: { team: Team; myMember: TeamMember }) {
+  const [prefs, setPrefs] = useState({ hide_status: false, hide_balance: false, hide_active: false, ...myMember.privacy_prefs });
 
   const handleToggle = async (key: 'hide_status' | 'hide_balance' | 'hide_active', value: boolean) => {
+    const previous = prefs[key];
     const next = { ...prefs, [key]: value };
+    setPrefs(next);
     const error = await updateMyPrivacyPrefs(team.id, next);
-    if (error) { swal({ icon: 'error', title: 'Could not save', text: error }); return; }
-    onChanged();
+    if (error) {
+      swal({ icon: 'error', title: 'Could not save', text: error });
+      setPrefs(p => ({ ...p, [key]: previous }));
+    }
   };
 
   return (
@@ -3712,6 +3734,7 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
   const typingRef = useRef<ReturnType<typeof subscribeToTyping> | null>(null);
   const typingTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const photoInputRef = useRef<HTMLInputElement>(null);
 
   const { session } = useTeamAuth();
   const myUserId = session?.user.id;
@@ -3760,6 +3783,27 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
     const error = await reportMessage(team.id, 'team_messages', m.id, reason);
     if (error) { swal({ icon: 'error', title: 'Could not report message', text: error }); return; }
     swalToast({ icon: 'success', title: 'Reported to admins' });
+  };
+
+  // Applied on-device immediately (add/remove the chip right away) rather than waiting on the
+  // round trip — toggleReaction's own realtime subscription would eventually reconcile this
+  // anyway, but that has a real network round trip's worth of lag a reaction shouldn't have.
+  const handleToggleReaction = async (tId: string, table: 'team_messages', messageId: string, emoji: string) => {
+    if (!myUserId) return;
+    const existing = reactions.find(r => r.message_id === messageId && r.emoji === emoji && r.user_id === myUserId);
+    if (existing) {
+      setReactions(prev => prev.filter(r => r.id !== existing.id));
+    } else {
+      const optimistic: MessageReaction = { id: crypto.randomUUID(), message_id: messageId, message_table: table, team_id: tId, user_id: myUserId, emoji, created_at: new Date().toISOString() };
+      setReactions(prev => [...prev, optimistic]);
+    }
+    const error = await toggleReaction(tId, table, messageId, emoji);
+    if (error) {
+      swalToast({ icon: 'error', title: 'Could not react' });
+      // Roll back by re-fetching rather than hand-reconstructing the exact prior state —
+      // simpler and this only runs on the rare failure path.
+      listReactions(team.id, 'team_messages').then(setReactions);
+    }
   };
 
   const pinned = messages.filter(m => m.pinned && !m.deleted).slice(0, 3);
@@ -3891,7 +3935,7 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
             onPin={pinTeamMessage}
             onReport={handleReportMessage}
             onDownloadAttachment={(channelId, msgId, name) => cc.downloadTaskAttachment(channelId, msgId, name)}
-            onToggleReaction={toggleReaction}
+            onToggleReaction={handleToggleReaction}
           />
         ))}
         {showJumpToEnd && (
@@ -4038,6 +4082,22 @@ function DirectThread({ team, partnerId, partnerName, partnerAvatar, onBack, onO
     swalToast({ icon: 'success', title: 'Reported to admins' });
   };
 
+  const handleToggleReaction = async (tId: string, table: 'direct_messages', messageId: string, emoji: string) => {
+    if (!myUserId) return;
+    const existing = reactions.find(r => r.message_id === messageId && r.emoji === emoji && r.user_id === myUserId);
+    if (existing) {
+      setReactions(prev => prev.filter(r => r.id !== existing.id));
+    } else {
+      const optimistic: MessageReaction = { id: crypto.randomUUID(), message_id: messageId, message_table: table, team_id: tId, user_id: myUserId, emoji, created_at: new Date().toISOString() };
+      setReactions(prev => [...prev, optimistic]);
+    }
+    const error = await toggleReaction(tId, table, messageId, emoji);
+    if (error) {
+      swalToast({ icon: 'error', title: 'Could not react' });
+      listReactions(team.id, 'direct_messages').then(setReactions);
+    }
+  };
+
   const messageById = new Map(messages.map(m => [m.id, m]));
   const reactionsByMessageId = new Map<string, MessageReaction[]>();
   for (const r of reactions) {
@@ -4133,7 +4193,7 @@ function DirectThread({ team, partnerId, partnerName, partnerAvatar, onBack, onO
             onEdit={(msg) => { setEditingId(msg.id); setBody(msg.body); }}
             onDelete={deleteDirectMessage}
             onReport={handleReportMessage}
-            onToggleReaction={toggleReaction}
+            onToggleReaction={handleToggleReaction}
           />
         ))}
         {showJumpToEnd && (
