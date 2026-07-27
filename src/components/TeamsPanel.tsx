@@ -59,6 +59,7 @@ import {
 } from '../lib/chat';
 import { notify } from '../lib/notifications';
 import { dominantColorFromImage } from '../lib/color';
+import { renderMarkdownMessage } from '../lib/miniMarkdown';
 import { useChatBubbleMenu, ChatBubbleIcons } from './ChatBubbleMenu';
 import { subscribeToTeamPresence, subscribeToGlobalPresence } from '../lib/presence';
 import { requestOwnerTransfer, decideOwnerTransfer, getMyPendingOwnerTransfers, OwnerTransferRequest } from '../lib/ownerTransfer';
@@ -3537,7 +3538,7 @@ const TeamMessageBubble = memo(function TeamMessageBubble({ message, replied, is
             <p className="text-sm text-ink-faint italic">This message was deleted</p>
           ) : (
             <>
-              <p className="text-sm text-ink whitespace-pre-line">{m.body}</p>
+              <p className="text-sm text-ink">{renderMarkdownMessage(m.body)}</p>
               {m.attachment_msg_id && (
                 <button
                   onClick={() => onDownloadAttachment(telegramChannelId, m.attachment_msg_id!, m.attachment_name || 'attachment')}
@@ -3617,7 +3618,7 @@ const DirectMessageBubble = memo(function DirectMessageBubble({ message, replied
             <p className="text-sm text-ink-faint italic">This message was deleted</p>
           ) : (
             <>
-              <p className="text-sm text-ink whitespace-pre-line">{m.body}</p>
+              <p className="text-sm text-ink">{renderMarkdownMessage(m.body)}</p>
               {m.attachment_msg_id && (
                 <button
                   onClick={() => onDownloadAttachment(telegramChannelId, m.attachment_msg_id!, m.attachment_name || 'attachment')}
