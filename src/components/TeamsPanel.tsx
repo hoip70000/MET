@@ -20,14 +20,15 @@ import {
   createTeam, getMyOwnedTeam, getMyMembership, getPendingInvitesForMe,
   inviteMember, acceptInvite, declineInvite, listTeamMembers, updateMemberFields,
   promoteToLeader, demoteToMember, removeMember, getLeaderboard,
-  updateTeamSettings, deleteTeam, broadcastToTeam, updateMyNotificationPrefs,
+  updateTeamSettings, deleteTeam, broadcastToTeam, updateMyNotificationPrefs, updateMyPrivacyPrefs,
+  setMemberVerified, listMyMemberships, getActiveTeamId, setActiveTeamId,
   TeamCustomPermissionDef, TeamCustomPermissionGrant,
   listCustomPermissionDefs, createCustomPermissionDef, deleteCustomPermissionDef,
   listCustomPermissionGrants, grantCustomPermission, revokeCustomPermission,
 } from '../lib/teams';
 import {
   Task, TaskPriority, TaskStatus, TaskAttachment, createTaskWithWorkflow, listTeamTasks, listMyTasks, deleteTask, attachFileToTask, listTaskAttachments,
-  setTeamTelegramChannel, acceptTask, declineTask, submitTask, approveTask, rejectSubmission,
+  setTeamTelegramChannel, acceptTask, declineTask, submitTask, approveTask, rejectSubmission, markTaskUnsuccessful,
   checkIn, setMemberActive, expireStaleOffers, reassignMemberTasks, notifyUpcomingTaskDeadlines, spawnRecurringTasks,
   TaskChecklistItem, listChecklistItems, addChecklistItem, toggleChecklistItem, deleteChecklistItem,
   TaskHistoryEntry, listTaskHistory,
@@ -54,8 +55,12 @@ import {
   editTeamMessage, deleteTeamMessage, pinTeamMessage, editDirectMessage, deleteDirectMessage,
   listReactions, subscribeToReactions, toggleReaction, MessageReaction,
   parseMentions, subscribeToTyping, markTeamChatRead, getTeamChatUnreadCount,
+  reportMessage,
 } from '../lib/chat';
 import { notify } from '../lib/notifications';
+import { dominantColorFromImage } from '../lib/color';
+import { useChatBubbleMenu, ChatBubbleIcons } from './ChatBubbleMenu';
+import { subscribeToTeamPresence, subscribeToGlobalPresence } from '../lib/presence';
 import { requestOwnerTransfer, decideOwnerTransfer, getMyPendingOwnerTransfers, OwnerTransferRequest } from '../lib/ownerTransfer';
 import { listTeamBadges, TeamBadge, listMemberBadges, MemberBadge } from '../lib/teamBadges';
 import { getCurrentSeasonLeaderboard, closeCurrentSeason, SeasonLeaderboardRow } from '../lib/seasons';
@@ -380,6 +385,7 @@ function DashboardSection({ team, myMember, canManage, members, onChanged }: { t
       )}
 
       {myMember && <MyNotificationPrefsCard team={team} myMember={myMember} onChanged={onChanged} />}
+      {myMember && <MyPrivacyPrefsCard team={team} myMember={myMember} onChanged={onChanged} />}
 
       {myMember && <MyJobsCard team={team} />}
 
@@ -571,6 +577,33 @@ function MyNotificationPrefsCard({ team, myMember, onChanged }: { team: Team; my
   );
 }
 
+function MyPrivacyPrefsCard({ team, myMember, onChanged }: { team: Team; myMember: TeamMember; onChanged: () => void }) {
+  const prefs = { hide_status: false, hide_balance: false, hide_active: false, ...myMember.privacy_prefs };
+
+  const handleToggle = async (key: 'hide_status' | 'hide_balance' | 'hide_active', value: boolean) => {
+    const next = { ...prefs, [key]: value };
+    const error = await updateMyPrivacyPrefs(team.id, next);
+    if (error) { swal({ icon: 'error', title: 'Could not save', text: error }); return; }
+    onChanged();
+  };
+
+  return (
+    <GlassCard className="p-6 space-y-3">
+      <h3 className="text-sm font-semibold text-ink">My Privacy</h3>
+      {([
+        ['hide_active', 'Hide my online/active status'],
+        ['hide_status', 'Hide my member status (on leave, etc.)'],
+        ['hide_balance', 'Hide my bank balance from others'],
+      ] as const).map(([key, label]) => (
+        <div key={key} className="flex items-center justify-between">
+          <span className="text-sm text-ink-muted">{label}</span>
+          <Switch checked={!!prefs[key]} onChange={v => handleToggle(key, v)} />
+        </div>
+      ))}
+    </GlassCard>
+  );
+}
+
 function MyJobsCard({ team }: { team: Team }) {
   const [jobs, setJobs] = useState<TeamMemberJob[]>([]);
   const [loading, setLoading] = useState(true);
@@ -743,6 +776,18 @@ function EditMemberModal({ member, teamId, isOwner, onClose, onSaved }: { member
     setCustomPermInput('');
   };
 
+  const [verified, setVerified] = useState(member.is_verified);
+  const [verifiedBusy, setVerifiedBusy] = useState(false);
+
+  const handleToggleVerified = async (next: boolean) => {
+    if (!member.user_id) return;
+    setVerifiedBusy(true);
+    const error = await setMemberVerified(teamId, member.user_id, next);
+    setVerifiedBusy(false);
+    if (error) { swal({ icon: 'error', title: 'Could not update', text: error }); return; }
+    setVerified(next);
+  };
+
   const handleSave = async () => {
     setSaving(true);
     const error = await updateMemberFields(member.id, {
@@ -780,6 +825,12 @@ function EditMemberModal({ member, teamId, isOwner, onClose, onSaved }: { member
           <label className="text-xs text-accent font-semibold">Display title (e.g. "Bank Officer")</label>
           <Input value={customTitle} onChange={e => setCustomTitle(e.target.value)} placeholder="Optional" />
         </div>
+        {isOwner && (
+          <div className="flex items-center justify-between gap-3 p-2.5 rounded-xl bg-ink/5 border border-hairline">
+            <span className="flex items-center gap-1.5 text-xs font-semibold text-ink"><ShieldCheck size={13} className="text-accent" /> Verified</span>
+            <Switch checked={verified} onChange={handleToggleVerified} disabled={verifiedBusy} />
+          </div>
+        )}
 
         <div className="space-y-1.5 pt-2 border-t border-hairline">
           <label className="text-xs text-accent font-semibold">Jobs &amp; Priorities</label>
@@ -1191,6 +1242,7 @@ function AdminTeamSection({ cc }: { cc: CloudClient }) {
 
 function MemberTeamSection({ cc }: { cc: CloudClient }) {
   const [loading, setLoading] = useState(true);
+  const [memberships, setMemberships] = useState<(TeamMember & { team: Team })[]>([]);
   const [membership, setMembership] = useState<(TeamMember & { team: Team }) | null>(null);
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [invites, setInvites] = useState<(TeamMember & { team: Team })[]>([]);
@@ -1198,6 +1250,8 @@ function MemberTeamSection({ cc }: { cc: CloudClient }) {
 
   const refresh = async () => {
     setLoading(true);
+    const all = await listMyMemberships();
+    setMemberships(all);
     const active = await getMyMembership();
     setMembership(active);
     if (active) {
@@ -1206,6 +1260,11 @@ function MemberTeamSection({ cc }: { cc: CloudClient }) {
       setInvites(await getPendingInvitesForMe());
     }
     setLoading(false);
+  };
+
+  const handleSwitchTeam = async (teamId: string) => {
+    await setActiveTeamId(teamId);
+    await refresh();
   };
 
   useEffect(() => { refresh(); }, []);
@@ -1248,15 +1307,29 @@ function MemberTeamSection({ cc }: { cc: CloudClient }) {
   if (membership) {
     const freshMe = members.find(m => m.id === membership.id) || membership;
     return (
-      <TeamWorkspace
-        team={membership.team}
-        members={members}
-        isOwner={false}
-        myMember={freshMe}
-        canManage={membership.role === 'leader'}
-        onChanged={refresh}
-        cc={cc}
-      />
+      <div className="space-y-3">
+        {memberships.length > 1 && (
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold text-ink-muted">Team:</span>
+            <select
+              value={membership.team_id}
+              onChange={e => handleSwitchTeam(e.target.value)}
+              className="bg-ink/5 border border-hairline rounded-lg px-2.5 py-1.5 text-xs font-semibold text-ink outline-none focus:border-accent"
+            >
+              {memberships.map(m => <option key={m.team_id} value={m.team_id}>{m.team.name}</option>)}
+            </select>
+          </div>
+        )}
+        <TeamWorkspace
+          team={membership.team}
+          members={members}
+          isOwner={false}
+          myMember={freshMe}
+          canManage={membership.role === 'leader'}
+          onChanged={refresh}
+          cc={cc}
+        />
+      </div>
     );
   }
 
@@ -1538,7 +1611,7 @@ function TeamDirectory() {
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
             {sortedTeams.map(t => (
-              <GlassCard key={t.id} className="overflow-hidden flex flex-col w-full">
+              <GlassCard key={t.id} className="stagger-item overflow-hidden flex flex-col w-full">
                 {t.join_ad_url && (
                   <div className="w-full overflow-hidden border-b border-hairline bg-ink/[0.04] flex items-center justify-center">
                     <img src={t.join_ad_url} alt="" className="w-full max-h-56 object-contain" />
@@ -1585,11 +1658,16 @@ function TeamDirectory() {
 
 function RequestJoinModal({ target, onClose }: { target: { id: string; name: string }; onClose: () => void }) {
   const [message, setMessage] = useState('');
+  const [jobTypes, setJobTypes] = useState<JobTitle[]>([]);
   const [sending, setSending] = useState(false);
+
+  const toggleJob = (job: JobTitle) => {
+    setJobTypes(prev => prev.includes(job) ? prev.filter(j => j !== job) : [...prev, job]);
+  };
 
   const handleSend = async () => {
     setSending(true);
-    const error = await requestToJoinTeam(target.id, message.trim());
+    const error = await requestToJoinTeam(target.id, message.trim(), jobTypes);
     setSending(false);
     if (error) { swal({ icon: 'error', title: 'Could not send request', text: error }); return; }
     swalToast({ icon: 'success', title: 'Join request sent' });
@@ -1600,9 +1678,29 @@ function RequestJoinModal({ target, onClose }: { target: { id: string; name: str
     <Modal open onClose={onClose} title={`Request to join ${target.name}`} size="sm" footer={
       <Button className="w-full" onClick={handleSend} disabled={sending}>{sending ? 'Sending...' : 'Send Request'}</Button>
     }>
-      <div className="space-y-1">
-        <label className="text-xs text-accent font-semibold">Message (optional letter to the admin)</label>
-        <Textarea placeholder="Tell them a bit about yourself..." value={message} onChange={e => setMessage(e.target.value)} rows={4} />
+      <div className="space-y-3">
+        <div className="space-y-1.5">
+          <label className="text-xs text-accent font-semibold">Which job(s) are you applying for?</label>
+          <div className="flex flex-wrap gap-1.5">
+            {JOB_TITLES.map(job => (
+              <button
+                key={job}
+                type="button"
+                onClick={() => toggleJob(job)}
+                className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                  jobTypes.includes(job) ? 'bg-accent text-white border-accent' : 'bg-ink/5 border-hairline text-ink-muted hover:bg-ink/10'
+                }`}
+              >
+                {job}
+              </button>
+            ))}
+          </div>
+          <p className="text-[10px] text-ink-faint">If accepted, you'll be given priority for whichever job(s) you pick here.</p>
+        </div>
+        <div className="space-y-1">
+          <label className="text-xs text-accent font-semibold">Message (optional letter to the admin)</label>
+          <Textarea placeholder="Tell them a bit about yourself..." value={message} onChange={e => setMessage(e.target.value)} rows={4} />
+        </div>
       </div>
     </Modal>
   );
@@ -1751,6 +1849,25 @@ function RateSubmissionControl({ task, onChanged }: { task: Task; onChanged: () 
     onChanged();
   };
 
+  const handleMarkUnsuccessful = async () => {
+    const result = await swal({
+      icon: 'warning',
+      title: 'Mark this task unsuccessful?',
+      text: 'This is final — the task is closed out as unsuccessful rather than sent back for revision.',
+      input: 'text',
+      inputLabel: 'Reason (optional)',
+      showCancelButton: true,
+      confirmButtonText: 'Mark Unsuccessful',
+    });
+    if (!result.isConfirmed) return;
+    setBusy(true);
+    const error = await markTaskUnsuccessful(task.id, result.value || undefined);
+    setBusy(false);
+    if (error) { swal({ icon: 'error', title: 'Could not update task', text: error }); return; }
+    swalToast({ icon: 'success', title: 'Task marked unsuccessful' });
+    onChanged();
+  };
+
   if (rejecting) {
     return (
       <div className="flex gap-1.5 mt-1">
@@ -1766,7 +1883,8 @@ function RateSubmissionControl({ task, onChanged }: { task: Task; onChanged: () 
         {[1, 2, 3, 4, 5].map(n => <option key={n} value={n}>{n} star{n > 1 ? 's' : ''}</option>)}
       </select>
       <Button size="sm" onClick={handleApprove} disabled={busy}><ThumbsUp size={11} /></Button>
-      <Button size="sm" variant="secondary" onClick={() => setRejecting(true)} disabled={busy}><ThumbsDown size={11} /></Button>
+      <Button size="sm" variant="secondary" onClick={() => setRejecting(true)} disabled={busy} title="Send back for revision"><ThumbsDown size={11} /></Button>
+      <Button size="sm" variant="danger" onClick={handleMarkUnsuccessful} disabled={busy} title="Mark unsuccessful (final)">✕</Button>
     </div>
   );
 }
@@ -2112,7 +2230,11 @@ function TasksSection({ team, members, canManageTasks, canReviewTasks, canPrevie
                     {t.due_date && (
                       <span className="text-[10px] text-ink-faint flex items-center gap-1"><CalendarClock size={11} /> {formatDue(t.due_date)}</span>
                     )}
-                    <span className="text-[10px] font-semibold text-ink-faint">{STATUS_LABEL[t.status]}</span>
+                    <span className="text-[10px] font-semibold text-ink-faint">
+                      {t.status === 'todo' ? 'Pending' : STATUS_LABEL[t.status]}
+                      {t.status === 'todo' && t.offer_expires_at && <span className="text-ink-faint font-normal"> · offer expires {formatDue(t.offer_expires_at)}</span>}
+                      {t.status === 'cancelled' && t.last_outcome === 'unsuccessful' && <span className="text-danger font-normal"> · unsuccessful</span>}
+                    </span>
                     {t.status !== 'todo' && <TaskAttachmentControl task={t} team={team} cc={cc} onChanged={refresh} />}
                     {t.status === 'todo' && t.attachment_msg_id && (
                       <button onClick={() => cc.downloadTaskAttachment(team.telegram_channel_id, t.attachment_msg_id!, t.attachment_name || 'attachment')} className="text-[11px] text-accent hover:text-ink flex items-center gap-1 font-semibold">
@@ -2788,7 +2910,7 @@ function AnalyticsSection({ team, members }: { team: Team; members: TeamMember[]
         {top.map((m, i) => (
           <div key={m.id} className="flex items-center justify-between p-2.5 rounded-xl border border-hairline">
             <span className="text-sm font-semibold text-ink">#{i + 1} {m.profile?.name || m.invited_email}</span>
-            <span className="text-sm font-bold text-accent">${m.balance.toFixed(2)}</span>
+            <span className="text-sm font-bold text-accent">{m.privacy_prefs?.hide_balance ? '••••' : `$${m.balance.toFixed(2)}`}</span>
           </div>
         ))}
       </GlassCard>
@@ -2810,7 +2932,7 @@ function AnalyticsSection({ team, members }: { team: Team; members: TeamMember[]
         {members.map(m => (
           <div key={m.id} className="flex items-center justify-between p-2 text-xs border-b border-hairline last:border-0">
             <span className="text-ink">{m.profile?.name || m.invited_email} <span className="text-ink-faint">({m.job_title || 'no job'})</span></span>
-            <span className="font-semibold text-ink">${m.balance.toFixed(2)}</span>
+            <span className="font-semibold text-ink">{m.privacy_prefs?.hide_balance ? '••••' : `$${m.balance.toFixed(2)}`}</span>
           </div>
         ))}
       </GlassCard>
@@ -3245,6 +3367,21 @@ function ChatSection({ team, members, myMember, isOwner, canManage, onChanged, c
   );
 }
 
+function useSenderColor(avatar: string | undefined): string {
+  const [color, setColor] = useState('inherit');
+  useEffect(() => {
+    let cancelled = false;
+    if (!avatar) { setColor('inherit'); return; }
+    dominantColorFromImage(avatar, 'inherit').then(c => { if (!cancelled) setColor(c); });
+    return () => { cancelled = true; };
+  }, [avatar]);
+  return color;
+}
+
+function formatMessageTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+}
+
 function ChatAvatar({ name, avatar, size = 28 }: { name: string; avatar?: string; size?: number }) {
   return (
     <div
@@ -3258,6 +3395,7 @@ function ChatAvatar({ name, avatar, size = 28 }: { name: string; avatar?: string
 
 function hydrateSender(msg: TeamMessage, members: TeamMember[]): TeamMessage {
   if (msg.sender?.name) return msg;
+  if (msg.sender_id === null) return { ...msg, sender: { name: 'Team Bot', avatar: '' } };
   const m = members.find(mm => mm.user_id === msg.sender_id);
   return { ...msg, sender: { name: m?.profile?.name || m?.invited_email || 'Member', avatar: m?.profile?.avatar || '' } };
 }
@@ -3319,11 +3457,12 @@ function reactionsSignatureEqual(a: MessageReaction[], b: MessageReaction[]): bo
   return true;
 }
 
-const TeamMessageBubble = memo(function TeamMessageBubble({ message, replied, isMine, canManage, reactions, myUserId, teamId, telegramChannelId, onOpenProfile, onReply, onEdit, onDelete, onPin, onDownloadAttachment, onToggleReaction }: {
+const TeamMessageBubble = memo(function TeamMessageBubble({ message, replied, isMine, canManage, isVerified, reactions, myUserId, teamId, telegramChannelId, onOpenProfile, onReply, onEdit, onDelete, onPin, onReport, onDownloadAttachment, onToggleReaction }: {
   message: TeamMessage;
   replied: TeamMessage | null;
   isMine: boolean;
   canManage: boolean;
+  isVerified?: boolean;
   reactions: MessageReaction[];
   myUserId: string | undefined;
   teamId: string;
@@ -3333,27 +3472,40 @@ const TeamMessageBubble = memo(function TeamMessageBubble({ message, replied, is
   onEdit: (m: TeamMessage) => void;
   onDelete: (id: string) => void;
   onPin: (id: string, pinned: boolean) => void;
+  onReport: (m: TeamMessage) => void;
   onDownloadAttachment: (channelId: string, msgId: number, name: string) => void;
   onToggleReaction: (teamId: string, table: 'team_messages', messageId: string, emoji: string) => void;
 }) {
   const m = message;
+  const isBot = m.sender_id === null;
+  const nameColor = useSenderColor(m.sender?.avatar);
+  const { bind, menuElement } = useChatBubbleMenu();
+  const bubbleActions = () => [
+    { key: 'copy', label: 'Copy', icon: <ChatBubbleIcons.Copy size={13} />, onSelect: () => navigator.clipboard.writeText(m.body) },
+    !m.deleted && { key: 'reply', label: 'Reply', icon: <ChatBubbleIcons.Reply size={13} />, onSelect: () => onReply(m) },
+    !m.deleted && isMine && { key: 'edit', label: 'Edit', icon: <ChatBubbleIcons.Edit size={13} />, onSelect: () => onEdit(m) },
+    !m.deleted && !isMine && { key: 'report', label: 'Report to Admin', icon: <ChatBubbleIcons.Report size={13} />, onSelect: () => onReport(m) },
+    !m.deleted && canManage && { key: 'pin', label: m.pinned ? 'Unpin' : 'Pin', icon: m.pinned ? <ChatBubbleIcons.PinOff size={13} /> : <ChatBubbleIcons.Pin size={13} />, onSelect: () => onPin(m.id, !m.pinned) },
+    !m.deleted && (isMine || canManage) && { key: 'delete', label: 'Delete', icon: <ChatBubbleIcons.Delete size={13} />, danger: true, onSelect: () => onDelete(m.id) },
+  ].filter(Boolean) as { key: string; label: string; icon: React.ReactNode; danger?: boolean; onSelect: () => void }[];
+
   return (
-    <div className={`flex items-start gap-2 max-w-md group ${isMine ? 'ml-auto flex-row-reverse' : ''}`}>
-      <button type="button" onClick={() => onOpenProfile(m.sender_id)} className="shrink-0">
+    <div className={`flex items-start gap-2 max-w-md group animate-fade-in-up ${isMine ? 'ml-auto flex-row-reverse' : ''}`}>
+      <button type="button" onClick={() => m.sender_id && onOpenProfile(m.sender_id)} className="shrink-0" disabled={isBot}>
         <ChatAvatar name={m.sender?.name || 'Member'} avatar={m.sender?.avatar} />
       </button>
       <div className="min-w-0 flex-1">
-        <div className={`p-2.5 rounded-2xl min-w-0 backdrop-blur-sm shadow-sm transition-all duration-200 ${isMine ? 'bg-gradient-to-br from-accent-soft to-accent-soft/60 rounded-tr-sm' : 'bg-gradient-to-br from-ink/[0.04] to-ink/[0.02] rounded-tl-sm'}`}>
+        <div
+          {...bind(bubbleActions)}
+          className={`p-2.5 rounded-2xl min-w-0 backdrop-blur-sm shadow-sm transition-all duration-200 select-none ${isMine ? 'bg-gradient-to-br from-accent-soft to-accent-soft/60 rounded-tr-sm' : 'bg-gradient-to-br from-ink/[0.04] to-ink/[0.02] rounded-tl-sm'}`}
+        >
           <div className={`flex items-center gap-2 ${isMine ? 'flex-row-reverse' : ''}`}>
-            <button type="button" onClick={() => onOpenProfile(m.sender_id)} className="text-[10px] font-semibold text-accent hover:underline">{m.sender?.name || 'Member'}</button>
+            <button type="button" onClick={() => m.sender_id && onOpenProfile(m.sender_id)} disabled={isBot} className="text-[10px] font-semibold hover:underline flex items-center gap-1 disabled:cursor-default" style={{ color: isBot ? undefined : nameColor }}>
+              {m.sender?.name || 'Member'} {isVerified && <ShieldCheck size={10} className="text-accent" />}
+            </button>
             {m.pinned && <span className="text-[9px] text-ink-faint">📌</span>}
             {m.edited_at && !m.deleted && <span className="text-[9px] text-ink-faint">(edited)</span>}
-            <span className={`text-[9px] text-ink-faint opacity-0 group-hover:opacity-100 transition-opacity flex gap-1.5 ${isMine ? 'mr-auto' : 'ml-auto'}`}>
-              {!m.deleted && <button onClick={() => onReply(m)} className="hover:text-accent">Reply</button>}
-              {!m.deleted && isMine && <button onClick={() => onEdit(m)} className="hover:text-accent">Edit</button>}
-              {!m.deleted && isMine && <button onClick={() => onDelete(m.id)} className="hover:text-danger">Delete</button>}
-              {!m.deleted && canManage && <button onClick={() => onPin(m.id, !m.pinned)} className="hover:text-accent">{m.pinned ? 'Unpin' : 'Pin'}</button>}
-            </span>
+            <span className="text-[9px] text-ink-faint">{formatMessageTime(m.created_at)}</span>
           </div>
           {replied && (
             <div className="mt-1 mb-1 pl-2 border-l-2 border-accent/40 text-[10px] text-ink-faint truncate">
@@ -3378,22 +3530,25 @@ const TeamMessageBubble = memo(function TeamMessageBubble({ message, replied, is
         </div>
         {!m.deleted && <ReactionBar reactions={reactions} myUserId={myUserId} onToggle={emoji => onToggleReaction(teamId, 'team_messages', m.id, emoji)} />}
       </div>
+      {menuElement}
     </div>
   );
 }, (prev, next) => (
   prev.message === next.message &&
   prev.replied === next.replied &&
+  prev.isVerified === next.isVerified &&
   prev.isMine === next.isMine &&
   prev.canManage === next.canManage &&
   prev.myUserId === next.myUserId &&
   reactionsSignatureEqual(prev.reactions, next.reactions)
 ));
 
-const DirectMessageBubble = memo(function DirectMessageBubble({ message, replied, isMine, partnerId, reactions, myUserId, teamId, telegramChannelId, partnerName, partnerAvatar, onDownloadAttachment, onReply, onEdit, onDelete, onToggleReaction }: {
+const DirectMessageBubble = memo(function DirectMessageBubble({ message, replied, isMine, partnerId, isPartnerOnline, reactions, myUserId, teamId, telegramChannelId, partnerName, partnerAvatar, onDownloadAttachment, onReply, onEdit, onDelete, onReport, onToggleReaction }: {
   message: DirectMessage;
   replied: DirectMessage | null;
   isMine: boolean;
   partnerId: string;
+  isPartnerOnline?: boolean;
   reactions: MessageReaction[];
   myUserId: string | undefined;
   teamId: string;
@@ -3404,24 +3559,34 @@ const DirectMessageBubble = memo(function DirectMessageBubble({ message, replied
   onReply: (m: DirectMessage) => void;
   onEdit: (m: DirectMessage) => void;
   onDelete: (id: string) => void;
+  onReport: (m: DirectMessage) => void;
   onToggleReaction: (teamId: string, table: 'direct_messages', messageId: string, emoji: string) => void;
 }) {
   const m = message;
+  const { bind, menuElement } = useChatBubbleMenu();
+  const bubbleActions = () => [
+    { key: 'copy', label: 'Copy', icon: <ChatBubbleIcons.Copy size={13} />, onSelect: () => navigator.clipboard.writeText(m.body) },
+    !m.deleted && { key: 'reply', label: 'Reply', icon: <ChatBubbleIcons.Reply size={13} />, onSelect: () => onReply(m) },
+    !m.deleted && isMine && { key: 'edit', label: 'Edit', icon: <ChatBubbleIcons.Edit size={13} />, onSelect: () => onEdit(m) },
+    !m.deleted && !isMine && { key: 'report', label: 'Report to Admin', icon: <ChatBubbleIcons.Report size={13} />, onSelect: () => onReport(m) },
+    !m.deleted && isMine && { key: 'delete', label: 'Delete', icon: <ChatBubbleIcons.Delete size={13} />, danger: true, onSelect: () => onDelete(m.id) },
+  ].filter(Boolean) as { key: string; label: string; icon: React.ReactNode; danger?: boolean; onSelect: () => void }[];
+
   return (
     <div className={`flex items-end gap-2 max-w-md group ${isMine ? 'ml-auto flex-row-reverse' : ''}`}>
-      <ChatAvatar name={partnerName} avatar={m.sender_id === partnerId ? partnerAvatar : undefined} size={22} />
+      <div className="relative shrink-0">
+        <ChatAvatar name={partnerName} avatar={m.sender_id === partnerId ? partnerAvatar : undefined} size={22} />
+        {m.sender_id === partnerId && isPartnerOnline && (
+          <span className="absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full bg-success border border-surface" />
+        )}
+      </div>
       <div className="min-w-0">
-        <div className={`p-2.5 rounded-2xl min-w-0 backdrop-blur-sm shadow-sm transition-all duration-200 ${!isMine ? 'bg-gradient-to-br from-ink/[0.04] to-ink/[0.02] rounded-bl-sm' : 'bg-gradient-to-br from-accent-soft to-accent-soft/60 rounded-br-sm'}`}>
-          {(m.edited_at || isMine) && !m.deleted && (
-            <div className="flex items-center gap-1.5 justify-end mb-0.5">
-              {m.edited_at && <span className="text-[9px] text-ink-faint">(edited)</span>}
-              <span className="text-[9px] text-ink-faint opacity-0 group-hover:opacity-100 transition-opacity flex gap-1.5">
-                <button onClick={() => onReply(m)} className="hover:text-accent">Reply</button>
-                {isMine && <button onClick={() => onEdit(m)} className="hover:text-accent">Edit</button>}
-                {isMine && <button onClick={() => onDelete(m.id)} className="hover:text-danger">Delete</button>}
-              </span>
-            </div>
-          )}
+        <div {...bind(bubbleActions)} className={`p-2.5 rounded-2xl min-w-0 backdrop-blur-sm shadow-sm transition-all duration-200 select-none animate-fade-in-up ${!isMine ? 'bg-gradient-to-br from-ink/[0.04] to-ink/[0.02] rounded-bl-sm' : 'bg-gradient-to-br from-accent-soft to-accent-soft/60 rounded-br-sm'}`}>
+          <div className="flex items-center gap-1.5 justify-end mb-0.5">
+            {m.edited_at && !m.deleted && <span className="text-[9px] text-ink-faint">(edited)</span>}
+            <span className="text-[9px] text-ink-faint">{formatMessageTime(m.created_at)}</span>
+            {isMine && !m.deleted && <span className={`text-[9px] ${m.read ? 'text-accent' : 'text-ink-faint'}`}>{m.read ? '✓✓' : '✓'}</span>}
+          </div>
           {replied && (
             <div className="mb-1 pl-2 border-l-2 border-accent/40 text-[10px] text-ink-faint truncate">
               {replied.deleted ? 'Message deleted' : replied.body}
@@ -3445,6 +3610,7 @@ const DirectMessageBubble = memo(function DirectMessageBubble({ message, replied
         </div>
         {!m.deleted && <ReactionBar reactions={reactions} myUserId={myUserId} onToggle={emoji => onToggleReaction(teamId, 'direct_messages', m.id, emoji)} />}
       </div>
+      {menuElement}
     </div>
   );
 }, (prev, next) => (
@@ -3453,6 +3619,7 @@ const DirectMessageBubble = memo(function DirectMessageBubble({ message, replied
   prev.isMine === next.isMine &&
   prev.myUserId === next.myUserId &&
   prev.partnerAvatar === next.partnerAvatar &&
+  prev.isPartnerOnline === next.isPartnerOnline &&
   reactionsSignatureEqual(prev.reactions, next.reactions)
 ));
 
@@ -3501,6 +3668,26 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
   useEffect(() => {
     if (messages.length > 0 && myUserId) markTeamChatRead(team.id, messages[messages.length - 1].id);
   }, [messages.length, team.id, myUserId]);
+
+  const [activeUserIds, setActiveUserIds] = useState<string[]>([]);
+  useEffect(() => {
+    if (!myUserId) return;
+    return subscribeToTeamPresence(team.id, myUserId, setActiveUserIds);
+  }, [team.id, myUserId]);
+
+  const handleReportMessage = async (m: TeamMessage) => {
+    const { value: reason } = await swal({
+      title: 'Report message to admin',
+      input: 'textarea',
+      inputLabel: 'Why are you reporting this message?',
+      showCancelButton: true,
+      confirmButtonText: 'Report',
+    });
+    if (!reason) return;
+    const error = await reportMessage(team.id, 'team_messages', m.id, reason);
+    if (error) { swal({ icon: 'error', title: 'Could not report message', text: error }); return; }
+    swalToast({ icon: 'success', title: 'Reported to admins' });
+  };
 
   const pinned = messages.filter(m => m.pinned && !m.deleted).slice(0, 3);
   const messageById = new Map(messages.map(m => [m.id, m]));
@@ -3594,6 +3781,10 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
 
   return (
     <>
+      <div className="px-3 pt-2 shrink-0 flex items-center gap-1.5 text-[10px] text-ink-faint">
+        <span className={`w-1.5 h-1.5 rounded-full ${activeUserIds.length > 0 ? 'bg-success' : 'bg-ink-faint'}`} />
+        {activeUserIds.length === 0 ? 'No users active' : activeUserIds.length === 1 ? '1 user active' : `${activeUserIds.length} users active`}
+      </div>
       {pinned.length > 0 && (
         <div className="px-3 py-2 border-b border-hairline bg-accent-soft/40 space-y-1 shrink-0">
           {pinned.map(p => (
@@ -3613,6 +3804,7 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
             replied={m.reply_to_id ? messageById.get(m.reply_to_id) ?? null : null}
             isMine={m.sender_id === myUserId}
             canManage={canManage}
+            isVerified={members.find(mm => mm.user_id === m.sender_id)?.is_verified}
             reactions={reactionsByMessageId.get(m.id) ?? EMPTY_REACTIONS}
             myUserId={myUserId}
             teamId={team.id}
@@ -3622,6 +3814,7 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
             onEdit={(msg) => { setEditingId(msg.id); setBody(msg.body); }}
             onDelete={deleteTeamMessage}
             onPin={pinTeamMessage}
+            onReport={handleReportMessage}
             onDownloadAttachment={(channelId, msgId, name) => cc.downloadTaskAttachment(channelId, msgId, name)}
             onToggleReaction={toggleReaction}
           />
@@ -3637,14 +3830,14 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
       </div>
       {Object.keys(typingUsers).length > 0 && (
         <div className="px-3 pb-1 shrink-0 flex items-center gap-2 animate-fade-in-up">
-          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-ink/[0.05] border border-hairline text-[11px] text-ink-muted">
-            {(() => {
-              const names = Object.values(typingUsers);
-              if (names.length === 1) return `${names[0]} is typing`;
-              if (names.length === 2) return `${names[0]} and ${names[1]} are typing`;
-              return `${names.length} people are typing`;
-            })()}
-            <span className="inline-flex gap-0.5 ml-0.5">
+          <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full bg-ink/[0.05] border border-hairline">
+            <span className="flex -space-x-1.5">
+              {Object.keys(typingUsers).slice(0, 4).map(userId => {
+                const m = members.find(mm => mm.user_id === userId);
+                return <ChatAvatar key={userId} name={m?.profile?.name || 'Member'} avatar={m?.profile?.avatar} size={18} />;
+              })}
+            </span>
+            <span className="inline-flex gap-0.5">
               <span className="w-1 h-1 rounded-full bg-ink-faint animate-typing-dot [animation-delay:0ms]" />
               <span className="w-1 h-1 rounded-full bg-ink-faint animate-typing-dot [animation-delay:150ms]" />
               <span className="w-1 h-1 rounded-full bg-ink-faint animate-typing-dot [animation-delay:300ms]" />
@@ -3749,6 +3942,27 @@ function DirectThread({ team, partnerId, partnerName, partnerAvatar, onBack, onO
     return () => { mounted = false; unsubscribe(); unsubReactions(); };
   }, [team.id, partnerId]);
 
+  const [onlineUserIds, setOnlineUserIds] = useState<string[]>([]);
+  useEffect(() => {
+    if (!myUserId) return;
+    return subscribeToGlobalPresence(myUserId, setOnlineUserIds);
+  }, [myUserId]);
+  const isPartnerOnline = onlineUserIds.includes(partnerId);
+
+  const handleReportMessage = async (m: DirectMessage) => {
+    const { value: reason } = await swal({
+      title: 'Report message to admin',
+      input: 'textarea',
+      inputLabel: 'Why are you reporting this message?',
+      showCancelButton: true,
+      confirmButtonText: 'Report',
+    });
+    if (!reason) return;
+    const error = await reportMessage(team.id, 'direct_messages', m.id, reason);
+    if (error) { swal({ icon: 'error', title: 'Could not report message', text: error }); return; }
+    swalToast({ icon: 'success', title: 'Reported to admins' });
+  };
+
   const messageById = new Map(messages.map(m => [m.id, m]));
   const reactionsByMessageId = new Map<string, MessageReaction[]>();
   for (const r of reactions) {
@@ -3817,7 +4031,10 @@ function DirectThread({ team, partnerId, partnerName, partnerAvatar, onBack, onO
           <ArrowLeft size={14} />
         </button>
         <button type="button" onClick={() => onOpenProfile(partnerId)} className="flex items-center gap-2 hover:opacity-80">
-          <ChatAvatar name={partnerName} avatar={partnerAvatar} size={24} />
+          <span className="relative">
+            <ChatAvatar name={partnerName} avatar={partnerAvatar} size={24} />
+            {isPartnerOnline && <span className="absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full bg-success border border-surface" />}
+          </span>
           <p className="text-sm font-semibold text-ink">{partnerName}</p>
         </button>
       </div>
@@ -3829,6 +4046,7 @@ function DirectThread({ team, partnerId, partnerName, partnerAvatar, onBack, onO
             replied={m.reply_to_id ? messageById.get(m.reply_to_id) ?? null : null}
             isMine={m.sender_id !== partnerId}
             partnerId={partnerId}
+            isPartnerOnline={isPartnerOnline}
             reactions={reactionsByMessageId.get(m.id) ?? EMPTY_REACTIONS}
             myUserId={myUserId}
             teamId={team.id}
@@ -3839,6 +4057,7 @@ function DirectThread({ team, partnerId, partnerName, partnerAvatar, onBack, onO
             onReply={setReplyTo}
             onEdit={(msg) => { setEditingId(msg.id); setBody(msg.body); }}
             onDelete={deleteDirectMessage}
+            onReport={handleReportMessage}
             onToggleReaction={toggleReaction}
           />
         ))}
@@ -4104,9 +4323,9 @@ function AdminSection({ team, members, onChanged }: { team: Team; members: TeamM
           <button
             type="button"
             onClick={() => joinAdInputRef.current?.click()}
-            className="w-full aspect-[16/6] rounded-xl overflow-hidden border border-dashed border-hairline flex items-center justify-center bg-ink/[0.02] hover:bg-ink/[0.05] transition-colors"
+            className="w-full max-h-56 rounded-xl overflow-hidden border border-dashed border-hairline flex items-center justify-center bg-ink/[0.02] hover:bg-ink/[0.05] transition-colors"
           >
-            {joinAdUrl ? <img src={joinAdUrl} alt="Join ad" className="w-full h-full object-cover" /> : <ImagePlus size={20} className="text-ink-faint" />}
+            {joinAdUrl ? <img src={joinAdUrl} alt="Join ad" className="w-full max-h-56 object-contain" /> : <ImagePlus size={20} className="text-ink-faint" />}
           </button>
           <input ref={joinAdInputRef} type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) readAvatarFile(f, setJoinAdUrl, 480); }} />
         </div>

@@ -31,6 +31,7 @@ export interface Task {
   offer_expires_at: string | null;
   /** Index into job_types — which pipeline stage currently holds the task. job_types.length === 1 behaves exactly as a single-stage task always has. */
   stage_index: number;
+  last_outcome: 'pending' | 'success' | 'revision' | 'unsuccessful' | null;
   assignee?: { name: string; avatar: string; email: string } | null;
 }
 
@@ -113,6 +114,11 @@ export const approveTask = (taskId: string, rating: number) =>
   rpc('task_approve', { _task_id: taskId, _rating: rating });
 export const rejectSubmission = (taskId: string, notes: string) =>
   rpc('task_reject_submission', { _task_id: taskId, _notes: notes });
+
+/** Terminal failure, distinct from `rejectSubmission`'s retry/revision loop — see
+ *  `last_outcome` on Task. */
+export const markTaskUnsuccessful = (taskId: string, notes?: string) =>
+  rpc('task_mark_unsuccessful', { _task_id: taskId, _notes: notes ?? null });
 export const checkIn = (teamId: string) => rpc('team_check_in', { _team_id: teamId });
 export const setMemberActive = (teamId: string, isActive: boolean) =>
   rpc('team_set_active', { _team_id: teamId, _is_active: isActive });

@@ -1,4 +1,4 @@
-import { Folder, FolderPlus, ChevronRight, Trash2, Home, Users } from 'lucide-react';
+import { Folder, FolderPlus, ChevronRight, Trash2, Home, Users, Download } from 'lucide-react';
 import { GlassCard, Button } from '../ui';
 import { swal } from '../../lib/swalTheme';
 import type { CloudFolder } from '../../lib/cloudClient';
@@ -11,9 +11,10 @@ interface CloudFoldersProps {
   onDeleteFolder: (folder: CloudFolder) => void;
   fileCountFor: (folderId: number) => number;
   onEditMembers?: (folder: CloudFolder, members: string[]) => void;
+  onDownloadFolderZip?: (folder: CloudFolder) => void;
 }
 
-export function CloudFolders({ folders, currentFolderId, onNavigate, onCreateFolder, onDeleteFolder, fileCountFor, onEditMembers }: CloudFoldersProps) {
+export function CloudFolders({ folders, currentFolderId, onNavigate, onCreateFolder, onDeleteFolder, fileCountFor, onEditMembers, onDownloadFolderZip }: CloudFoldersProps) {
   const childFolders = folders.filter(f => f.parentId === currentFolderId);
 
   const breadcrumb: CloudFolder[] = [];
@@ -84,6 +85,16 @@ export function CloudFolders({ folders, currentFolderId, onNavigate, onCreateFol
               <span className="text-xs font-semibold text-ink text-center truncate w-full">{folder.name}</span>
               <span className="text-[10px] text-ink-faint">{fileCountFor(folder.id)} file(s){folder.members.length > 0 ? ` · ${folder.members.length} member(s)` : ''}</span>
               <div className="absolute top-1.5 right-1.5 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                {onDownloadFolderZip && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onDownloadFolderZip(folder); }}
+                    className="p-1 rounded-lg bg-black/40 text-white"
+                    aria-label={`Download ${folder.name} as ZIP`}
+                    title="Download folder as ZIP"
+                  >
+                    <Download size={11} />
+                  </button>
+                )}
                 {onEditMembers && (
                   <button
                     onClick={(e) => { e.stopPropagation(); handleEditMembers(folder); }}

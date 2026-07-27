@@ -460,6 +460,15 @@
   animation: splashParticle var(--particle-duration, 900ms) ease-out both;
 }
 
+/* Splash exit: the whole screen gets yanked up and off-screen fast, rather than fading out */
+@keyframes splashPullUp {
+  0% { transform: translateY(0); }
+  100% { transform: translateY(-100%); }
+}
+.animate-splash-pull-up {
+  animation: splashPullUp 260ms cubic-bezier(0.4, 0, 1, 1) both;
+}
+
 /* Ad banner crossfade, retriggered via React `key` on each rotation */
 @keyframes adFade {
   0% { opacity: 0; transform: scale(1.02); }

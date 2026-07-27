@@ -7,10 +7,13 @@ import { AdSlot } from './AdSlot';
 import { swal, swalToast } from '../lib/swalTheme';
 import { readAvatarFile, uploadImageToStorage } from '../lib/image';
 import { useTeamAuth, profileFromSession } from '../lib/teamAuth';
-import { requestNotificationPermission } from '../lib/notifications';
+import { requestNotificationPermission, getUserNotificationPrefs, setUserNotificationPrefs, type UserNotificationPrefs, type NotifyChannel } from '../lib/notifications';
+import { subscribeToPush, unsubscribeFromPush, isPushSupported } from '../lib/webPush';
 import { Bell } from 'lucide-react';
 import { AdminAnnouncementsPanel } from './AdminAnnouncementsPanel';
 import { isAllowedAnnouncementSender } from '../lib/adminMessages';
+import { AdminDashboard } from './AdminDashboard';
+import { isSiteAdmin } from '../lib/adminDashboard';
 import { loadMagicEraseServer, saveMagicEraseServer } from '../lib/magicEraseStore';
 
 interface SettingsPanelProps {
@@ -40,10 +43,12 @@ export function SettingsPanel({
   const { session, signOut, updateProfile } = useTeamAuth();
   const profile = profileFromSession(session);
   const [canSendAnnouncements, setCanSendAnnouncements] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
 
   useEffect(() => {
-    if (!session) { setCanSendAnnouncements(false); return; }
+    if (!session) { setCanSendAnnouncements(false); setIsAdmin(false); return; }
     isAllowedAnnouncementSender().then(setCanSendAnnouncements);
+    isSiteAdmin().then(setIsAdmin);
   }, [session]);
   const [name, setName] = useState(profile.name);
   const [avatar, setAvatar] = useState(profile.avatar);
@@ -70,6 +75,41 @@ export function SettingsPanel({
   const handleEnableNotifications = async () => {
     const result = await requestNotificationPermission();
     if (result) setNotifPermission(result);
+  };
+
+  const [userPrefs, setUserPrefs] = useState<UserNotificationPrefs | null>(null);
+  const [pushEnabled, setPushEnabled] = useState(false);
+  const [savingPush, setSavingPush] = useState(false);
+
+  useEffect(() => {
+    if (!session) return;
+    getUserNotificationPrefs().then(prefs => {
+      setUserPrefs(prefs);
+      setPushEnabled(prefs.broadcasts.channel === 'in_app_push' || prefs.requests.channel === 'in_app_push');
+    });
+  }, [session]);
+
+  const updateCategoryPref = async (category: 'broadcasts' | 'requests', patch: Partial<{ enabled: boolean; channel: NotifyChannel }>) => {
+    if (!userPrefs) return;
+    const next: UserNotificationPrefs = { ...userPrefs, [category]: { ...userPrefs[category], ...patch } };
+    setUserPrefs(next);
+    await setUserNotificationPrefs(next);
+  };
+
+  const handleTogglePush = async () => {
+    setSavingPush(true);
+    if (pushEnabled) {
+      await unsubscribeFromPush();
+      setPushEnabled(false);
+    } else {
+      const error = await subscribeToPush();
+      if (error) {
+        swal({ icon: 'error', title: 'Could not enable push notifications', text: error });
+      } else {
+        setPushEnabled(true);
+      }
+    }
+    setSavingPush(false);
   };
 
   const handleSaveProfile = async () => {
@@ -166,14 +206,14 @@ export function SettingsPanel({
       </GlassCard>
 
       {notifPermission !== null && (
-        <GlassCard className="p-6 space-y-3">
+        <GlassCard className="p-6 space-y-4">
           <h3 className="text-base font-semibold text-ink font-display">Notifications</h3>
           <div className="flex items-center justify-between gap-3">
             <span className="flex flex-col">
               <span className="flex items-center gap-2 text-sm font-medium text-ink">
                 <Bell size={16} className="text-ink-faint" /> Browser Notifications
               </span>
-              <span className="text-[10px] text-ink-faint font-normal">Get notified when a team invite, join request, or broadcast arrives</span>
+              <span className="text-[10px] text-ink-faint font-normal">Required before push can be enabled below</span>
             </span>
             {notifPermission === 'granted' ? (
               <span className="text-xs font-semibold text-accent">Enabled</span>
@@ -183,6 +223,55 @@ export function SettingsPanel({
               <Button size="sm" onClick={handleEnableNotifications}>Enable</Button>
             )}
           </div>
+
+          {isPushSupported() && (
+            <div className="flex items-center justify-between gap-3 border-t border-hairline pt-4">
+              <span className="flex flex-col">
+                <span className="text-sm font-medium text-ink">Push Notifications</span>
+                <span className="text-[10px] text-ink-faint font-normal">Get notified even when the app tab is closed</span>
+              </span>
+              <Button size="sm" variant={pushEnabled ? 'secondary' : 'primary'} onClick={handleTogglePush} disabled={savingPush || notifPermission !== 'granted'}>
+                {savingPush ? 'Saving...' : pushEnabled ? 'Disable' : 'Enable'}
+              </Button>
+            </div>
+          )}
+
+          {userPrefs && (
+            <div className="space-y-3 border-t border-hairline pt-4">
+              <p className="text-[10px] text-ink-faint">
+                Chat, task and bank notifications are configured per-team from that team's settings — these two are global.
+              </p>
+              {(['broadcasts', 'requests'] as const).map(category => (
+                <div key={category} className="flex items-center justify-between gap-3">
+                  <span className="flex flex-col">
+                    <span className="text-sm font-medium text-ink capitalize">{category === 'broadcasts' ? 'Admin Broadcasts' : 'Team Request Outcomes'}</span>
+                    <span className="text-[10px] text-ink-faint font-normal">
+                      {category === 'broadcasts' ? 'Announcements posted above the Library' : 'Join requests, invites, tasks, bank, etc. being accepted/refused'}
+                    </span>
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <label className="flex items-center gap-1.5 text-xs text-ink-muted">
+                      <input
+                        type="checkbox"
+                        checked={userPrefs[category].enabled}
+                        onChange={e => updateCategoryPref(category, { enabled: e.target.checked })}
+                      />
+                      On
+                    </label>
+                    <select
+                      className="text-xs rounded-lg border border-hairline bg-ink/5 px-2 py-1 text-ink disabled:opacity-40"
+                      value={userPrefs[category].channel}
+                      disabled={!userPrefs[category].enabled}
+                      onChange={e => updateCategoryPref(category, { channel: e.target.value as NotifyChannel })}
+                    >
+                      <option value="in_app">In-app only</option>
+                      <option value="in_app_push">In-app + Push</option>
+                    </select>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </GlassCard>
       )}
 
@@ -246,6 +335,7 @@ export function SettingsPanel({
       </GlassCard>
 
       {canSendAnnouncements && <AdminAnnouncementsPanel />}
+      {isAdmin && <AdminDashboard />}
 
       <GlassCard className="p-6 space-y-3">
         <h3 className="text-base font-semibold text-ink font-display">Legal</h3>

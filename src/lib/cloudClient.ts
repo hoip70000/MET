@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Api, TelegramClient } from 'telegram';
 import { StringSession } from 'telegram/sessions';
 import { swal, swalToast } from './swalTheme';
@@ -103,7 +103,6 @@ export function useCloudClient() {
       setClient(newClient);
       setIsConnected(true);
       await loadMe(newClient);
-      swalToast({ icon: 'success', title: 'Connected to Telegram successfully' });
     } catch (error) {
       console.error(error);
       setIsConnected(false);
@@ -178,11 +177,32 @@ export function useCloudClient() {
       });
 
       if (code) {
-        await newClient.invoke(new Api.auth.SignIn({
-          phoneNumber,
-          phoneCodeHash,
-          phoneCode: code
-        }));
+        try {
+          await newClient.invoke(new Api.auth.SignIn({
+            phoneNumber,
+            phoneCodeHash,
+            phoneCode: code
+          }));
+        } catch (signInErr: any) {
+          // Accounts with Two-Step Verification enabled reject the code alone and require
+          // the account's cloud password too — GramJS surfaces this as an RPC error rather
+          // than throwing a distinct class, so it's matched by message.
+          if (signInErr?.errorMessage === 'SESSION_PASSWORD_NEEDED' || /SESSION_PASSWORD_NEEDED/.test(String(signInErr?.message))) {
+            const { value: password } = await swal({
+              title: 'Two-Step Verification',
+              input: 'password',
+              inputLabel: 'Enter your Telegram cloud password',
+              inputPlaceholder: 'Password',
+            });
+            if (!password) throw new Error('Two-Step Verification password is required to finish signing in.');
+            await newClient.signInWithPassword(
+              { apiId: Number(apiId), apiHash },
+              { password: async () => password, onError: async (err) => { throw err; } }
+            );
+          } else {
+            throw signInErr;
+          }
+        }
 
         const sessionString = newClient.session.save() as unknown as string;
         localStorage.setItem('tg_api_id', apiId);
@@ -210,11 +230,20 @@ export function useCloudClient() {
     }
   };
 
+  // A first "preview" page loads fast rather than pulling the whole channel history up
+  // front — fetchMoreFiles below pages further back in time as the user asks for more.
+  const PREVIEW_PAGE_SIZE = 30;
+  const [hasMoreFiles, setHasMoreFiles] = useState(true);
+  const [isLoadingMoreFiles, setIsLoadingMoreFiles] = useState(false);
+  const oldestFetchedIdRef = useRef<number | null>(null);
+
   const fetchFiles = useCallback(async () => {
     if (!client || !chatId) return;
     setIsLoading(true);
     try {
-      const msgs = await client.getMessages(chatId, { limit: 100 });
+      const msgs = await client.getMessages(chatId, { limit: PREVIEW_PAGE_SIZE });
+      oldestFetchedIdRef.current = msgs.length > 0 ? msgs[msgs.length - 1].id : null;
+      setHasMoreFiles(msgs.length === PREVIEW_PAGE_SIZE);
 
       const cloudFiles: CloudFile[] = [];
       const cloudFolders: CloudFolder[] = [];
@@ -281,6 +310,58 @@ export function useCloudClient() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, chatId]);
+
+  const fetchMoreFiles = useCallback(async () => {
+    if (!client || !chatId || !hasMoreFiles || oldestFetchedIdRef.current == null) return;
+    setIsLoadingMoreFiles(true);
+    try {
+      const msgs = await client.getMessages(chatId, { limit: PREVIEW_PAGE_SIZE, offsetId: oldestFetchedIdRef.current });
+      oldestFetchedIdRef.current = msgs.length > 0 ? msgs[msgs.length - 1].id : oldestFetchedIdRef.current;
+      setHasMoreFiles(msgs.length === PREVIEW_PAGE_SIZE);
+
+      const moreFiles: CloudFile[] = [];
+      const moreFolders: CloudFolder[] = [];
+      msgs.forEach(m => {
+        if (!m.message) return;
+        try {
+          const data = JSON.parse(m.message);
+          if (!data || typeof data !== 'object') return;
+          if (m.media && data.type === 'workspace_backup') {
+            moreFiles.push({
+              id: m.id,
+              msg: m,
+              type: data.type,
+              scope: (['workspace', 'series', 'volume', 'chapter'].includes(data.scope) ? data.scope : 'workspace') as BackupScope,
+              name: data.name || 'Untitled',
+              description: data.description || '',
+              tags: Array.isArray(data.tags) ? data.tags : [],
+              sender: data.sender || 'Team Member',
+              folderId: typeof data.folderId === 'number' ? data.folderId : null,
+              coverMsgId: data.coverMsgId || 0,
+              sizeBytes: data.sizeBytes || 0,
+              date: data.date || new Date(m.date * 1000).toISOString(),
+            });
+          } else if (!m.media && data.type === 'folder') {
+            moreFolders.push({
+              id: m.id,
+              name: data.name || 'Untitled Folder',
+              parentId: typeof data.parentId === 'number' ? data.parentId : null,
+              members: Array.isArray(data.members) ? data.members : [],
+            });
+          }
+        } catch {
+          // not one of ours, ignore
+        }
+      });
+
+      setFiles(prev => [...prev, ...moreFiles]);
+      setFolders(prev => [...prev, ...moreFolders]);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsLoadingMoreFiles(false);
+    }
+  }, [client, chatId, hasMoreFiles]);
 
   const createFolder = async (name: string, parentId: number | null, members: string[] = []) => {
     if (!client || !chatId) return;
@@ -434,6 +515,46 @@ export function useCloudClient() {
       }
     } catch (e: any) {
       swal({ title: 'Error', text: e?.message || 'Download failed', icon: 'error' });
+    } finally {
+      setIsDownloading(false);
+    }
+  };
+
+  const downloadFolderAsZip = async (folderId: number | null, folderName: string) => {
+    const filesInFolder = files.filter(f => f.folderId === folderId);
+    if (filesInFolder.length === 0) {
+      swal({ icon: 'info', title: 'Empty folder', text: 'This folder has no files to download.' });
+      return;
+    }
+    setIsDownloading(true);
+    setDownloadProgress(0);
+    setDownloadLabel(`Packing "${folderName}"...`);
+    setDownloadTotalBytes(filesInFolder.reduce((sum, f) => sum + (f.sizeBytes || 0), 0));
+    try {
+      const { default: JSZip } = await import('jszip');
+      const zip = new JSZip();
+      for (let i = 0; i < filesInFolder.length; i++) {
+        const file = filesInFolder[i];
+        const buffer = await client?.downloadMedia(file.msg, {
+          progressCallback: () => setDownloadProgress(Math.min(99, Math.round((i / filesInFolder.length) * 100))),
+        } as any);
+        if (buffer) {
+          const ext = (file.msg as any)?.file?.name?.split('.').pop() || 'bin';
+          zip.file(`${file.name || `file-${i + 1}`}.${ext}`, buffer as any);
+        }
+      }
+      const blob = await zip.generateAsync({ type: 'blob' }, meta => setDownloadProgress(Math.round(meta.percent)));
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.style.display = 'none';
+      a.href = url;
+      a.download = `${folderName || 'folder'}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+    } catch (e: any) {
+      swal({ title: 'Error', text: e?.message || 'Could not build the folder ZIP', icon: 'error' });
     } finally {
       setIsDownloading(false);
     }
@@ -799,6 +920,9 @@ export function useCloudClient() {
     coverUrls,
     lastSyncedAt,
     fetchFiles,
+    fetchMoreFiles,
+    hasMoreFiles,
+    isLoadingMoreFiles,
     createFolder,
     deleteFolder,
     moveFile,
@@ -814,6 +938,7 @@ export function useCloudClient() {
     downloadLabel,
     downloadTotalBytes,
     downloadCloudFile,
+    downloadFolderAsZip,
 
     isRestoring,
     restoreProgress,

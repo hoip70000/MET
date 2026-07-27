@@ -3,7 +3,9 @@ import { supabase } from './supabaseClient';
 export interface TeamMessage {
   id: string;
   team_id: string;
-  sender_id: string;
+  /** null = a system bot message (see SYSTEM_BOT_SENDER_ID below) — team_messages.sender_id
+   *  is nullable specifically for this; every other message always has a real sender. */
+  sender_id: string | null;
   body: string;
   created_at: string;
   reply_to_id: string | null;
@@ -234,6 +236,25 @@ export function subscribeToReactions(teamId: string, onChange: () => void): () =
     .subscribe();
   return () => { supabase.removeChannel(channel); };
 }
+
+// ---------------------------------------------------------------------------
+// Report to admin
+// ---------------------------------------------------------------------------
+
+export async function reportMessage(teamId: string, messageTable: 'team_messages' | 'direct_messages', messageId: string, reason: string): Promise<string | null> {
+  const { data: userData } = await supabase.auth.getUser();
+  const reporterId = userData.user?.id;
+  if (!reporterId) return 'Not signed in.';
+  const { error } = await supabase.from('message_reports').insert({ team_id: teamId, message_table: messageTable, message_id: messageId, reporter_id: reporterId, reason });
+  return error ? error.message : null;
+}
+
+// ---------------------------------------------------------------------------
+// System bot — automated messages only (welcome/task notices), no command parsing.
+// ---------------------------------------------------------------------------
+
+/** team_messages rows with a null sender_id are system-bot messages — see system_post_message
+ *  in migration 0063_system_bot.sql for why this is a null sentinel rather than a synthetic user. */
 
 // ---------------------------------------------------------------------------
 // Mentions

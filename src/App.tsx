@@ -53,6 +53,12 @@ export default function App() {
 
   const [activeNavigationTab, setActiveNavigationTab] = useState<NavTabId>('library');
 
+  // Desktop-only sidebar hide/show, persisted across sessions.
+  const [sidebarHidden, setSidebarHidden] = useState(() => localStorage.getItem('sidebar_hidden') === '1');
+  useEffect(() => {
+    localStorage.setItem('sidebar_hidden', sidebarHidden ? '1' : '0');
+  }, [sidebarHidden]);
+
   // Create workspace modal
   const [showCreateWorkspaceModal, setShowCreateWorkspaceModal] = useState(false);
   const [newWorkspaceName, setNewWorkspaceName] = useState('');
@@ -193,23 +199,11 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cloudClient.isConnected, cloudClient.chatId, isLoadingLibrary]);
 
-  // Once per session, nudge the user if it's been 7+ days since their last
-  // successful Telecloud backup.
-  const backupReminderShownRef = useRef(false);
-  useEffect(() => {
-    if (backupReminderShownRef.current) return;
-    backupReminderShownRef.current = true;
-    const lastBackupAt = Number(localStorage.getItem('tg_last_backup_at') || 0);
-    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
-    if (!lastBackupAt || Date.now() - lastBackupAt > sevenDaysMs) {
-      swalToast({
-        icon: 'warning',
-        title: 'Back up your library',
-        text: "It's been over 7 days since your last Telecloud backup.",
-        timer: 6000,
-      });
-    }
-  }, []);
+  const visibleWorkspaces = (() => {
+    const q = workspaceSearchQuery.trim().toLowerCase();
+    if (!q) return workspaces;
+    return workspaces.filter(w => w.name.toLowerCase().includes(q) || w.tags.some(t => t.toLowerCase().includes(q)));
+  })();
 
   const visibleWorkspaces = (() => {
     const q = workspaceSearchQuery.trim().toLowerCase();
@@ -735,9 +729,15 @@ export default function App() {
         />
       )}
 
-      <SidebarRail activeTab={activeNavigationTab} onTabChange={setActiveNavigationTab} onCreatePress={handleCreatePress} />
+      <SidebarRail
+        activeTab={activeNavigationTab}
+        onTabChange={setActiveNavigationTab}
+        onCreatePress={handleCreatePress}
+        hidden={sidebarHidden}
+        onToggleHidden={() => setSidebarHidden(h => !h)}
+      />
 
-      <div className="flex flex-1 lg:pl-20">
+      <div className={`flex flex-1 ${sidebarHidden ? '' : 'lg:pl-20'}`}>
         <main key={activeNavigationTab} className="animate-view-fade flex-1 min-w-0 px-4 sm:px-6 lg:px-10 py-6 sm:py-8 pb-28 lg:pb-10 max-w-6xl mx-auto w-full">
           {activeNavigationTab === 'settings' && (
             <SettingsPanel
