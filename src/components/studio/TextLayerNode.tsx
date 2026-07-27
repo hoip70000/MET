@@ -156,7 +156,7 @@ export function TextLayerNode({
         // this fires without an intervening onTransform, e.g. a transform with no actual movement.)
         node.scaleX(1);
         node.scaleY(1);
-        onUpdate({
+        const patch: Partial<TextLayerData> = {
           x: node.x(),
           y: node.y(),
           rotation: node.rotation(),
@@ -164,7 +164,17 @@ export function TextLayerNode({
           ...(text.autoWidth
             ? { fontSize: Math.max(6, text.fontSize * scaleY) }
             : { fixedHeight: Math.max(20, (text.fixedHeight ?? layout.height) * scaleY) }),
-        });
+        };
+        // Permanent regression guard, not a temporary debug check: `fontSize` only ever appears in
+        // the patch above via the `text.autoWidth` (point-text) branch, so its mere presence here
+        // for an area layer means this handler was edited to scale type size with the box again —
+        // exactly the bug the point/area split above exists to prevent. Dev-only so a real user
+        // never has a resize hard-fail over this in production; it still fires in `npm test`/local
+        // dev, which is where a reintroduced regression would actually get caught.
+        if (import.meta.env.DEV && !text.autoWidth && 'fontSize' in patch) {
+          throw new Error('REGRESSION: area text resize must never modify fontSize');
+        }
+        onUpdate(patch);
       }}
     >
       {/* Hit area + the Group's bounds, so clicking gaps between glyphs still selects the layer and

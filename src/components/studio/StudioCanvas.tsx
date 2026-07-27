@@ -2260,6 +2260,18 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
               anchorCornerRadius={2}
               enabledAnchors={['top-left', 'top-center', 'top-right', 'middle-left', 'middle-right', 'bottom-left', 'bottom-center', 'bottom-right']}
               boundBoxFunc={(oldBox, newBox) => (newBox.width < 20 ? oldBox : newBox)}
+              // Corners resize both dimensions, edges resize one — sizing them differently (8px vs
+              // 6px) makes that distinction visible at a glance instead of eight identical squares.
+              // Konva already assigns the correct directional resize cursor per anchor name on its
+              // own; only the size needs overriding here.
+              anchorStyleFunc={(anchor) => {
+                const isCorner = ['top-left', 'top-right', 'bottom-left', 'bottom-right'].includes(anchor.name());
+                const size = isCorner ? 8 : 6;
+                anchor.width(size);
+                anchor.height(size);
+                anchor.offsetX(size / 2);
+                anchor.offsetY(size / 2);
+              }}
             />
           </Layer>
 

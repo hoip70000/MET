@@ -1333,6 +1333,32 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     canvasRef.current?.centerTextLayerInBubble(id);
   }
 
+  /** Layers panel's right-click Convert to Point/Area Text. */
+  function handleConvertTextMode(id: string, toAutoWidth: boolean) {
+    const layer = findLayer(layers, id);
+    if (!layer || layer.type !== 'text' || !layer.text) return;
+    if (toAutoWidth) {
+      // Area -> Point: the frame goes away. `width` is left as-is rather than cleared — a point
+      // layer keeps a usable width if it's later converted back to area (TextLayerData.autoWidth's
+      // own doc comment). `fixedHeight` is meaningless for point text, so it's cleared rather than
+      // left stale for a later area conversion to inherit unexpectedly.
+      updateLayers(current => updateLayer(current, id, l =>
+        l.type === 'text' && l.text ? { ...l, text: { ...l.text, autoWidth: true, fixedHeight: undefined } } : l
+      ), 'Convert to Point Text');
+    } else {
+      // Point -> Area: seed the new frame from the text's current natural size — the same
+      // `layoutText({ ...text, autoWidth: true })` call StudioCanvas.tsx's own auto-fit-width
+      // double-click already uses — so the box starts exactly where the type currently sits on
+      // screen instead of jumping to some default size.
+      const natural = layoutText({ ...layer.text, autoWidth: true });
+      updateLayers(current => updateLayer(current, id, l =>
+        l.type === 'text' && l.text
+          ? { ...l, text: { ...l.text, autoWidth: false, width: natural.width, fixedHeight: natural.height } }
+          : l
+      ), 'Convert to Area Text');
+    }
+  }
+
   /**
    * Bumps the active text layer's font size by `typerSizeStep * delta` and re-centers it around
    * its old midpoint (mirrors the real TypeR extension's size-increment shortcut). Line spacing
@@ -1537,6 +1563,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
       activeMaskLayerId={activeMaskLayerId}
       expandedLayerId={expandedLayerId}
       onToggleExpanded={(id) => setExpandedLayerId(current => (current === id ? null : id))}
+      onConvertTextMode={handleConvertTextMode}
       hideTitle
     />
   );
