@@ -762,7 +762,13 @@ export default function App() {
 
           {activeNavigationTab === 'text-editor' && (
             <div className="fixed inset-0 lg:relative lg:inset-auto flex flex-col bg-[#0b0b0d] lg:rounded-2xl lg:overflow-hidden lg:border lg:border-hairline lg:h-[calc(100vh-8.5rem)] z-30">
-              <TextEditorPage onSendToTyper={(script) => setPendingTyperScript(script)} />
+              <TextEditorPage
+                hasActiveChapter={!!activeChapter}
+                onSendToTyper={(script) => {
+                  setPendingTyperScript(script);
+                  setActiveNavigationTab('library');
+                }}
+              />
             </div>
           )}
 

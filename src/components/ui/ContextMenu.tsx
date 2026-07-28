@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Scissors, Copy, ClipboardPaste, TextSelect } from 'lucide-react';
+import { Scissors, Copy, ClipboardPaste, TextSelect, Check, X } from 'lucide-react';
 
 type EditableEl = HTMLInputElement | HTMLTextAreaElement;
 
@@ -19,6 +19,9 @@ interface PendingMenu {
   editableHost: HTMLElement | null;
   selectedText: string;
   savedRange: Range | null;
+  /** Set when the right-clicked target is a spell-check flag (the Text Editor's `.spell-miss`
+   *  spans) — renders a "Change to / Ignore" body instead of Cut/Copy/Paste for that one case. */
+  spellFix?: string | null;
 }
 
 /**
@@ -41,6 +44,15 @@ export function AppContextMenu() {
       if (e.defaultPrevented) return;
       const target = e.target as HTMLElement | null;
       if (!target) return;
+
+      if (target.classList.contains('spell-miss')) {
+        e.preventDefault();
+        setMenu({
+          x: e.clientX, y: e.clientY, target, editableHost: closestContentEditable(target),
+          selectedText: '', savedRange: null, spellFix: target.dataset.fix ?? null,
+        });
+        return;
+      }
 
       const editableHost = isFormField(target) ? target : closestContentEditable(target);
       let selectedText = '';
@@ -87,8 +99,42 @@ export function AppContextMenu() {
 
   if (!menu) return null;
 
-  const { target, editableHost, selectedText, savedRange } = menu;
+  const { target, editableHost, selectedText, savedRange, spellFix } = menu;
   const isField = isFormField(target);
+
+  // Dispatched rather than called directly: this component is a global singleton with no
+  // knowledge of which feature's text it's editing, so it notifies whoever owns `target` (the
+  // Text Editor's own autosave) via a bubbling custom event instead of importing that feature's
+  // internals here.
+  const notifyTextChanged = () => target.dispatchEvent(new CustomEvent('te-spell-fix', { bubbles: true }));
+
+  if (spellFix !== undefined) {
+    const itemClass = 'flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm text-ink hover:bg-accent/15 hover:text-accent transition-colors';
+    const menuWidth = 200;
+    const menuHeight = 8 + (spellFix ? 2 : 1) * 34;
+    const left = Math.min(menu.x, window.innerWidth - menuWidth - 8);
+    const top = Math.min(menu.y, window.innerHeight - menuHeight - 8);
+    return (
+      <div ref={menuRef} className="liquid-glass-heavy fixed z-[999] min-w-[200px] rounded-2xl p-1" style={{ left, top }}>
+        {spellFix && (
+          <button
+            type="button"
+            className={itemClass}
+            onClick={() => { target.replaceWith(document.createTextNode(spellFix)); notifyTextChanged(); close(); }}
+          >
+            <Check size={14} /> Change to “{spellFix}”
+          </button>
+        )}
+        <button
+          type="button"
+          className={itemClass}
+          onClick={() => { target.replaceWith(document.createTextNode(target.textContent ?? '')); notifyTextChanged(); close(); }}
+        >
+          <X size={14} /> Ignore
+        </button>
+      </div>
+    );
+  }
 
   const refocusAndRestoreSelection = () => {
     if (isField) {
