@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Plus, X, Bold, Italic, Underline, AlignLeft, AlignCenter, AlignRight,
   List, ListOrdered, Search, Download, FileType, Printer, Send, Heading1, Heading2,
-  Check, Loader2, AlertCircle, Circle,
+  Check, Loader2, AlertCircle, Circle, PanelRight,
 } from 'lucide-react';
 import { Button, IconButton } from '../ui';
 import { swal, swalToast } from '../../lib/swalTheme';
@@ -10,6 +10,8 @@ import { genId } from '../../lib/id';
 import { loadTextEditorDocs, saveTextEditorDocs, type TextEditorDoc } from '../../lib/textEditorStore';
 import { markMisspellings, stripSpellMarks, findSpellIssues } from '../../lib/spellCheck';
 import { exportDocAsTxt, exportDocAsDocx, printDocAsPdf, downloadBlob } from '../../lib/textEditorExport';
+import { SplitScreenPreview } from './SplitScreenPreview';
+import type { Workspace } from '../../types';
 
 /**
  * Section 0 architecture audit (see plan doc for full detail):
@@ -91,9 +93,11 @@ const EditablePage = memo(function EditablePage({ initialHtml, pageRef, onInput,
 
 interface TextEditorPageProps {
   onSendToTyper: (script: string) => void;
+  workspaces: Workspace[];
 }
 
-export function TextEditorPage({ onSendToTyper }: TextEditorPageProps) {
+export function TextEditorPage({ onSendToTyper, workspaces }: TextEditorPageProps) {
+  const [splitScreenOpen, setSplitScreenOpen] = useState(false);
   const [docs, setDocs] = useState<TextEditorDoc[]>([]);
   const [activeDocId, setActiveDocId] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -444,7 +448,8 @@ export function TextEditorPage({ onSendToTyper }: TextEditorPageProps) {
   const { icon: SaveStatusIcon, label: saveStatusLabel, className: saveStatusClassName } = saveStatusDisplay[saveStatus];
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div className="flex h-full min-h-0">
+      <div className="flex flex-col flex-1 min-w-0 h-full min-h-0">
       {/* Document tabs */}
       <div className="flex items-center gap-1 px-3 h-10 shrink-0 border-b border-hairline overflow-x-auto">
         {docs.map(d => (
@@ -473,6 +478,9 @@ export function TextEditorPage({ onSendToTyper }: TextEditorPageProps) {
         </span>
         <IconButton size="sm" aria-label="Find & replace" onClick={() => setSearchOpen(v => !v)} className={`!bg-transparent shrink-0 ${searchOpen ? '!text-accent' : ''}`}>
           <Search size={14} />
+        </IconButton>
+        <IconButton size="sm" aria-label="Toggle split screen" onClick={() => setSplitScreenOpen(v => !v)} className={`!bg-transparent shrink-0 ${splitScreenOpen ? '!text-accent' : ''}`}>
+          <PanelRight size={14} />
         </IconButton>
       </div>
 
@@ -524,6 +532,8 @@ export function TextEditorPage({ onSendToTyper }: TextEditorPageProps) {
           </div>
         )}
       </div>
+      </div>
+      {splitScreenOpen && <SplitScreenPreview workspaces={workspaces} onClose={() => setSplitScreenOpen(false)} />}
     </div>
   );
 }
