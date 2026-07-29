@@ -26,6 +26,10 @@ interface UsePaintLayerArgs {
    *  read-only snapshot of the composited page art, so the wand can select from the actual
    *  manga art instead of silently no-op'ing against a nonexistent raster canvas. */
   getFallbackCanvas?: () => HTMLCanvasElement | null;
+  /** Fired whenever Clone/Heal's alt-clicked sample source is (re)set, so the caller can drive a
+   *  live source-point cursor indicator. Mirrors cloneSourceRef's own value; not cleared between
+   *  strokes, matching that ref's intentional "persists across strokes" behavior. */
+  onCloneSourceSet?: (pt: { x: number; y: number }) => void;
 }
 
 /**
@@ -34,7 +38,7 @@ interface UsePaintLayerArgs {
  * coordinates) only when `activeTool` is one of PAINT_TOOLS; select/pan/text keep
  * their existing, untouched code paths.
  */
-export function usePaintLayer({ getCanvas, settings, selection, onSelectionChange, onStrokeEnd, getLayerId, liquifySnapshots, getFallbackCanvas }: UsePaintLayerArgs) {
+export function usePaintLayer({ getCanvas, settings, selection, onSelectionChange, onStrokeEnd, getLayerId, liquifySnapshots, getFallbackCanvas, onCloneSourceSet }: UsePaintLayerArgs) {
   const drawingRef = useRef(false);
   const lastRef = useRef<{ x: number; y: number } | null>(null);
   // Intentionally shared between Clone Stamp and Healing Brush — Photoshop keeps one source point
@@ -127,6 +131,7 @@ export function usePaintLayer({ getCanvas, settings, selection, onSelectionChang
 
     if ((tool === 'clone' || tool === 'heal') && altKey) {
       cloneSourceRef.current = { x, y };
+      onCloneSourceSet?.({ x, y });
       return;
     }
     if (tool === 'gradient') {
@@ -173,7 +178,7 @@ export function usePaintLayer({ getCanvas, settings, selection, onSelectionChang
       smoothRef.current = { x, y };
     }
     applyStrokeSegment(ctx, tool, x, y, x, y, pressure);
-  }, [getCanvas, settings, selection, onStrokeEnd, getLayerId, liquifySnapshots]);
+  }, [getCanvas, settings, selection, onStrokeEnd, getLayerId, liquifySnapshots, onCloneSourceSet]);
 
   function applyStrokeSegment(ctx: CanvasRenderingContext2D, tool: PaintTool, lastX: number, lastY: number, x: number, y: number, pressure = 1) {
     if (tool === 'brush' || tool === 'pencil' || tool === 'eraser') {
