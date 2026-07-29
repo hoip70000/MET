@@ -190,6 +190,10 @@ export interface StudioCanvasHandle {
    * only ever read/write the active layer's own canvas, never the background underneath it.
    */
   seedLayerWithBackground: (layerId: string) => void;
+  /** Permanent regression guard: reads back a pixel from a freshly created layer's raster canvas
+   *  and throws if it isn't fully transparent. Call right after creating a "new layer" action that
+   *  is supposed to start blank — a real, silent regression class this exists to catch loudly. */
+  assertLayerBlank: (layerId: string) => void;
   /** Like seedLayerWithBackground, but draws `maskCanvas` (already carrying its own precise
    *  per-pixel alpha — see whitedDiff.ts) instead of a flat unmasked copy of the background. */
   seedLayerWithMaskedImage: (layerId: string, maskCanvas: HTMLCanvasElement) => void;
@@ -409,7 +413,7 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
   const activeLayer = findLayer(layers, activeLayerId) ?? null;
   const isPaintTool = (PAINT_TOOLS as readonly string[]).includes(activeTool);
   const paintLayerIdRef = useRef<string | null>(null);
-  paintLayerIdRef.current = activeLayer?.type === 'clean-patch' ? activeLayer.id : null;
+  paintLayerIdRef.current = activeLayer?.type === 'clean-patch' && !activeLayer.locked ? activeLayer.id : null;
 
   // The layer whose mask is being painted, and that mask's own registry id — derived from the
   // current tree rather than passed as two separate props, so they can never disagree.
@@ -731,6 +735,17 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(img, 0, 0);
       redrawLayerNode(layerId);
+    },
+    assertLayerBlank(layerId: string) {
+      const img = imageRef.current;
+      if (!img) return;
+      const canvas = getOrCreateCanvasFor(paintCanvasRegistry.current, layerId, img.width, img.height);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      const { data } = ctx.getImageData(Math.floor(canvas.width / 2), Math.floor(canvas.height / 2), 1, 1);
+      if (data[3] > 0) {
+        throw new Error('REGRESSION: new layer must be created empty');
+      }
     },
     seedLayerWithMaskedImage(layerId: string, maskCanvas: HTMLCanvasElement) {
       // Sized from `maskCanvas` itself (already the target page's own dimensions, per
@@ -1366,6 +1381,14 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
       return;
     }
     if (!isPaintTool) return;
+    // Quick Mask and layer-mask editing are legitimate alternate paint targets that bypass
+    // paintLayerIdRef entirely (see getActivePaintCanvas) — only gate the plain "paint onto the
+    // active layer" path here. No layer selected, the Background layer, or a locked layer are all
+    // covered by paintLayerIdRef being null (see its assignment above).
+    if (!editingMaskLayer && !quickMaskActive && !paintLayerIdRef.current) {
+      swalToast({ icon: 'warning', title: 'Select a layer to paint on' });
+      return;
+    }
     const p = imageSpacePointer();
     if (!p) return;
     // A real stylus reports actual pressure; mouse/touch report a flat 0.5 per spec, which isn't

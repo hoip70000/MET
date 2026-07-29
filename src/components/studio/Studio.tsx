@@ -831,10 +831,11 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     const layer = createLayer('clean-patch', `Layer ${flattenTree(layers).length}`);
     updateLayers(current => [...current, layer], 'Add Layer');
     setActiveLayerId(layer.id);
-    // New raster layers start as a working copy of the background — matches the standard
-    // "duplicate scan, clean the duplicate" manga workflow and gives clone/heal/filter-brush/
-    // liquify tools real pixels to act on immediately instead of an empty transparent canvas.
-    canvasRef.current?.seedLayerWithBackground(layer.id);
+    // New layers must start fully transparent — no background copy. A previous version of this
+    // function seeded new layers with the background image (see git history / CLAUDE.md), which
+    // silently defeated painting since new strokes were invisible against identical backing
+    // pixels. assertLayerBlank is a permanent regression tripwire against that ever coming back.
+    canvasRef.current?.assertLayerBlank(layer.id);
   }
 
   /** The explicit "I want a truly empty layer" action, alongside handleAddLayer's default
@@ -1695,8 +1696,10 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     if (activeLayer.type === 'clean-patch') return;
     // flattenTree, not the raw root array — a clean-patch layer nested inside a group is otherwise
     // invisible to this scan, so painting while a group holding one is active/collapsed would
-    // create a redundant new layer instead of reusing the one that already exists.
-    const existing = [...flattenTree(layers)].reverse().find(l => l.type === 'clean-patch');
+    // create a redundant new layer instead of reusing the one that already exists. Locked layers
+    // are excluded too — reusing one would just hand the user a target they can't actually paint
+    // on, tripping the "Select a layer to paint on" guard the moment they try.
+    const existing = [...flattenTree(layers)].reverse().find(l => l.type === 'clean-patch' && !l.locked);
     if (existing) {
       setActiveLayerId(existing.id);
     } else {
