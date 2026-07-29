@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Plus, X, Bold, Italic, Underline, AlignLeft, AlignCenter, AlignRight,
   List, ListOrdered, Search, Download, FileType, Printer, Send, Heading1, Heading2,
-  Check, Loader2, AlertCircle, Circle, PanelRight,
+  Check, Loader2, AlertCircle, Circle, PanelRight, Table as TableIcon,
 } from 'lucide-react';
 import { Button, IconButton } from '../ui';
 import { swal, swalToast } from '../../lib/swalTheme';
@@ -11,6 +11,12 @@ import { loadTextEditorDocs, saveTextEditorDocs, type TextEditorDoc } from '../.
 import { markMisspellings, stripSpellMarks, findSpellIssues } from '../../lib/spellCheck';
 import { exportDocAsTxt, exportDocAsDocx, printDocAsPdf, downloadBlob } from '../../lib/textEditorExport';
 import { SplitScreenPreview } from './SplitScreenPreview';
+import { TableToolbar } from './TableToolbar';
+import {
+  insertTableHtml, findEnclosingTable, findEnclosingCell, addRow, addColumn,
+  deleteRow, deleteColumn, deleteTable, restoreCaretAt, navigateCell,
+  type CaretRestorePoint,
+} from '../../lib/textEditorTables';
 import type { Workspace } from '../../types';
 
 /**
@@ -67,13 +73,15 @@ interface EditablePageProps {
   pageRef: (el: HTMLDivElement | null) => void;
   onInput: () => void;
   onClick: (e: React.MouseEvent) => void;
+  onKeyDown: (e: React.KeyboardEvent) => void;
+  onContextMenu: (e: React.MouseEvent) => void;
 }
 
 /** Isolated behind `memo` deliberately — see the A2 note in the audit comment
  *  above. Must receive only stable/primitive props (a string, not a fresh
  *  `{__html}` wrapper object; stable callback references) or the memoization
  *  is defeated and every parent re-render still reaches into this DOM. */
-const EditablePage = memo(function EditablePage({ initialHtml, pageRef, onInput, onClick }: EditablePageProps) {
+const EditablePage = memo(function EditablePage({ initialHtml, pageRef, onInput, onClick, onKeyDown, onContextMenu }: EditablePageProps) {
   return (
     <div className="shrink-0 overflow-hidden rounded-sm shadow-2xl" style={{ width: PAGE_WIDTH }}>
       <div
@@ -84,6 +92,8 @@ const EditablePage = memo(function EditablePage({ initialHtml, pageRef, onInput,
         dangerouslySetInnerHTML={{ __html: initialHtml }}
         onInput={onInput}
         onClick={onClick}
+        onKeyDown={onKeyDown}
+        onContextMenu={onContextMenu}
         className="te-page bg-white text-black px-16 py-16 text-[15px] leading-relaxed outline-none overflow-hidden"
         style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT, minHeight: PAGE_HEIGHT, colorScheme: 'light' }}
       />
@@ -111,6 +121,11 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
   const [replacement, setReplacement] = useState('');
   const [spellReport, setSpellReport] = useState<number | null>(null);
   const [saveStatus, setSaveStatus] = useState<'saved' | 'unsaved' | 'saving' | 'error'>('saved');
+  const [activeTable, setActiveTable] = useState<HTMLTableElement | null>(null);
+  const [tableFullySelected, setTableFullySelected] = useState(false);
+  const [tableContextMenuPos, setTableContextMenuPos] = useState<{ x: number; y: number } | null>(null);
+  const activeTableCellRef = useRef<HTMLTableCellElement | null>(null);
+  const tableContextMenuRef = useRef<HTMLDivElement | null>(null);
 
   const pageRefs = useRef<(HTMLDivElement | null)[]>([]);
   const dirtyRef = useRef(false);
@@ -130,7 +145,9 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
    *  (required for `EditablePage`'s `memo` to bail out) while always running
    *  the current render's actual logic, never a stale closure. */
   const runInputLogicRef = useRef<() => void>(() => {});
-  const runSpellClickLogicRef = useRef<(e: React.MouseEvent) => void>(() => {});
+  const runPageClickLogicRef = useRef<(e: React.MouseEvent) => void>(() => {});
+  const runKeyDownLogicRef = useRef<(e: React.KeyboardEvent) => void>(() => {});
+  const runContextMenuLogicRef = useRef<(e: React.MouseEvent) => void>(() => {});
 
   useEffect(() => { activeDocIdRef.current = activeDocId; }, [activeDocId]);
 
@@ -145,7 +162,9 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
   }
 
   const handleInput = useCallback(() => { runInputLogicRef.current(); }, []);
-  const handleSpellClick = useCallback((e: React.MouseEvent) => { runSpellClickLogicRef.current(e); }, []);
+  const handlePageClick = useCallback((e: React.MouseEvent) => { runPageClickLogicRef.current(e); }, []);
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => { runKeyDownLogicRef.current(e); }, []);
+  const handleContextMenu = useCallback((e: React.MouseEvent) => { runContextMenuLogicRef.current(e); }, []);
 
   /** Replaces every direct `setDocs(...)` call site so `docsRef` never drifts
    *  from `docs` state. */
@@ -311,6 +330,39 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeDoc?.pages.length]);
 
+  // The active table lives as a raw DOM node inside dangerouslySetInnerHTML
+  // content, not a React-managed element — its "selected" outline is applied
+  // imperatively rather than via a class from a stylesheet.
+  useEffect(() => {
+    if (!activeTable) return;
+    if (tableFullySelected) {
+      activeTable.style.outline = '2px solid #007AFF';
+      activeTable.style.outlineOffset = '1px';
+    } else {
+      activeTable.style.outline = '';
+      activeTable.style.outlineOffset = '';
+    }
+    return () => {
+      activeTable.style.outline = '';
+      activeTable.style.outlineOffset = '';
+    };
+  }, [activeTable, tableFullySelected]);
+
+  useEffect(() => {
+    if (!tableContextMenuPos) return;
+    function dismiss(e: PointerEvent) {
+      if (tableContextMenuRef.current?.contains(e.target as Node)) return;
+      setTableContextMenuPos(null);
+    }
+    function onKey(e: KeyboardEvent) { if (e.key === 'Escape') setTableContextMenuPos(null); }
+    window.addEventListener('pointerdown', dismiss);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('pointerdown', dismiss);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [tableContextMenuPos]);
+
   function runInputLogic() {
     scheduleAutosave();
     reflow();
@@ -375,13 +427,189 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
     setSpellReport(null);
   }
 
-  function runSpellClickLogic(e: React.MouseEvent) {
+  function runPageClickLogic(e: React.MouseEvent) {
     const target = e.target as HTMLElement;
-    if (!target.classList.contains('spell-miss')) return;
-    target.replaceWith(document.createTextNode(target.dataset.fix ?? target.textContent ?? ''));
-    scheduleAutosave();
+    if (target.classList.contains('spell-miss')) {
+      target.replaceWith(document.createTextNode(target.dataset.fix ?? target.textContent ?? ''));
+      scheduleAutosave();
+      return;
+    }
+    const table = findEnclosingTable(target);
+    if (table) {
+      setActiveTable(table);
+      activeTableCellRef.current = findEnclosingCell(target);
+      setTableFullySelected(false);
+    } else if (activeTable) {
+      setActiveTable(null);
+      setTableFullySelected(false);
+    }
   }
-  runSpellClickLogicRef.current = runSpellClickLogic;
+  runPageClickLogicRef.current = runPageClickLogic;
+
+  function runKeyDownLogic(e: React.KeyboardEvent) {
+    if (!activeTable) return;
+    if (e.key === 'Tab') {
+      const cell = findEnclosingCell(window.getSelection()?.anchorNode ?? null);
+      if (!cell) return;
+      e.preventDefault();
+      navigateCell(activeTable, cell, e.shiftKey ? 'prev' : 'next');
+      scheduleAutosave();
+      reflow();
+      return;
+    }
+    if ((e.key === 'Delete' || e.key === 'Backspace') && tableFullySelected) {
+      e.preventDefault();
+      const restore = deleteTable(activeTable);
+      setActiveTable(null);
+      setTableFullySelected(false);
+      if (restore) restoreCaretAt(restore);
+      scheduleAutosave();
+      reflow();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+      const cell = findEnclosingCell(window.getSelection()?.anchorNode ?? null);
+      if (cell) {
+        e.preventDefault();
+        setTableFullySelected(true);
+      }
+    }
+  }
+  runKeyDownLogicRef.current = runKeyDownLogic;
+
+  function runContextMenuLogic(e: React.MouseEvent) {
+    const table = findEnclosingTable(e.target as Node);
+    if (!table) return;
+    e.preventDefault();
+    setActiveTable(table);
+    activeTableCellRef.current = findEnclosingCell(e.target as Node);
+    setTableContextMenuPos({ x: e.clientX, y: e.clientY });
+  }
+  runContextMenuLogicRef.current = runContextMenuLogic;
+
+  function tableRowActionTarget(): { row: HTMLTableRowElement } | null {
+    if (!activeTable) return null;
+    const cell = activeTableCellRef.current;
+    const row = (cell?.parentElement as HTMLTableRowElement | null) ?? activeTable.querySelector('tr');
+    return row ? { row } : null;
+  }
+
+  function tableColIndex(): number {
+    const cell = activeTableCellRef.current;
+    if (!cell?.parentElement) return 0;
+    return Array.from(cell.parentElement.children).indexOf(cell);
+  }
+
+  function applyTableRestore(restore: CaretRestorePoint | null) {
+    if (restore) {
+      setActiveTable(null);
+      setTableFullySelected(false);
+      restoreCaretAt(restore);
+    }
+    scheduleAutosave();
+    reflow();
+  }
+
+  function handleAddRowAbove() {
+    const target = tableRowActionTarget();
+    if (!activeTable || !target) return;
+    addRow(activeTable, target.row, 'above');
+    scheduleAutosave();
+    reflow();
+  }
+
+  function handleAddRowBelow() {
+    const target = tableRowActionTarget();
+    if (!activeTable || !target) return;
+    addRow(activeTable, target.row, 'below');
+    scheduleAutosave();
+    reflow();
+  }
+
+  function handleAddColLeft() {
+    if (!activeTable) return;
+    addColumn(activeTable, tableColIndex(), 'left');
+    scheduleAutosave();
+    reflow();
+  }
+
+  function handleAddColRight() {
+    if (!activeTable) return;
+    addColumn(activeTable, tableColIndex(), 'right');
+    scheduleAutosave();
+    reflow();
+  }
+
+  function handleDeleteRowAction() {
+    const target = tableRowActionTarget();
+    if (!target) return;
+    applyTableRestore(deleteRow(target.row));
+  }
+
+  function handleDeleteColAction() {
+    if (!activeTable) return;
+    applyTableRestore(deleteColumn(activeTable, tableColIndex()));
+  }
+
+  function handleDeleteTableAction() {
+    if (!activeTable) return;
+    applyTableRestore(deleteTable(activeTable));
+  }
+
+  async function handleInsertTable() {
+    // By the time this handler runs, document.activeElement is already the
+    // toolbar button that was clicked (not the contentEditable) — the caret's
+    // Range is still valid though, so use it (rather than activeElement) to
+    // find which page to restore focus/selection into after the swal dialog
+    // (which steals focus) closes.
+    const sel = window.getSelection();
+    const savedRange = sel && sel.rangeCount > 0 ? sel.getRangeAt(0).cloneRange() : null;
+    const targetPageEl = savedRange
+      ? pageRefs.current.find((el): el is HTMLDivElement => !!el && el.contains(savedRange.commonAncestorContainer))
+      : null;
+
+    const result = await swal({
+      title: 'Insert Table',
+      html: `<div style="display:flex;gap:8px;justify-content:center;">
+        <input id="te-table-rows" type="number" min="1" max="20" value="3" placeholder="Rows" style="width:80px;padding:6px;border:1px solid #ccc;border-radius:6px;" />
+        <input id="te-table-cols" type="number" min="1" max="20" value="3" placeholder="Cols" style="width:80px;padding:6px;border:1px solid #ccc;border-radius:6px;" />
+      </div>`,
+      showCancelButton: true,
+      confirmButtonText: 'Insert',
+      preConfirm: () => {
+        const rowsEl = document.getElementById('te-table-rows') as HTMLInputElement | null;
+        const colsEl = document.getElementById('te-table-cols') as HTMLInputElement | null;
+        const rows = Math.max(1, Math.min(20, parseInt(rowsEl?.value ?? '3', 10) || 3));
+        const cols = Math.max(1, Math.min(20, parseInt(colsEl?.value ?? '3', 10) || 3));
+        return { rows, cols };
+      },
+    });
+    if (!result.isConfirmed || !result.value) return;
+    const { rows, cols } = result.value as { rows: number; cols: number };
+
+    // SweetAlert2's own dialog teardown (and any focus trap it holds) can still
+    // be in progress for a tick after the confirm promise resolves — refocusing
+    // the page immediately risks losing to it. Give it a beat to finish first.
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    const focusTarget = targetPageEl ?? pageRefs.current.find((el): el is HTMLDivElement => !!el);
+    if (focusTarget) {
+      focusTarget.focus();
+      const restoredSel = window.getSelection();
+      restoredSel?.removeAllRanges();
+      if (savedRange) {
+        restoredSel?.addRange(savedRange);
+      } else {
+        const endRange = document.createRange();
+        endRange.selectNodeContents(focusTarget);
+        endRange.collapse(false);
+        restoredSel?.addRange(endRange);
+      }
+    }
+    document.execCommand('insertHTML', false, insertTableHtml(rows, cols));
+    scheduleAutosave();
+    reflow();
+  }
 
   function replaceInDoc() {
     if (!query.trim() || !activeDoc) return;
@@ -442,6 +670,7 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
     { icon: AlignLeft, label: 'Align left', run: () => exec('justifyLeft') },
     { icon: AlignCenter, label: 'Align center', run: () => exec('justifyCenter') },
     { icon: AlignRight, label: 'Align right', run: () => exec('justifyRight') },
+    { icon: TableIcon, label: 'Insert Table', run: () => void handleInsertTable() },
   ], []);
 
   if (!loaded) {
@@ -535,7 +764,9 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
                 initialHtml={html}
                 pageRef={getPageRefCallback(i)}
                 onInput={handleInput}
-                onClick={handleSpellClick}
+                onClick={handlePageClick}
+                onKeyDown={handleKeyDown}
+                onContextMenu={handleContextMenu}
               />
             ))}
           </div>
@@ -543,6 +774,43 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
       </div>
       </div>
       {splitScreenOpen && <SplitScreenPreview workspaces={workspaces} onClose={() => setSplitScreenOpen(false)} />}
+      {activeTable && (
+        <TableToolbar
+          table={activeTable}
+          fullySelected={tableFullySelected}
+          onToggleFullySelected={() => {
+            setTableFullySelected(v => !v);
+            // Belt-and-suspenders alongside the handle button's own
+            // onMouseDown preventDefault: force focus/keydown routing back
+            // onto the contentEditable regardless of any focus quirks, so
+            // the very next Delete/Backspace reliably reaches runKeyDownLogic.
+            const table = activeTable;
+            const containingPage = pageRefs.current.find((el): el is HTMLDivElement => !!el && !!table && el.contains(table));
+            containingPage?.focus();
+          }}
+          onAddRowAbove={handleAddRowAbove}
+          onAddRowBelow={handleAddRowBelow}
+          onAddColLeft={handleAddColLeft}
+          onAddColRight={handleAddColRight}
+          onDeleteRow={handleDeleteRowAction}
+          onDeleteCol={handleDeleteColAction}
+          onDeleteTable={handleDeleteTableAction}
+        />
+      )}
+      {tableContextMenuPos && (
+        <div
+          ref={tableContextMenuRef}
+          className="fixed z-50 bg-elevated border border-hairline rounded-md shadow-panel py-1"
+          style={{ top: tableContextMenuPos.y, left: tableContextMenuPos.x }}
+        >
+          <button
+            className="block w-full text-left text-[12px] px-3 py-1.5 hover:bg-ink/10 text-danger whitespace-nowrap"
+            onClick={() => { handleDeleteTableAction(); setTableContextMenuPos(null); }}
+          >
+            Delete Table
+          </button>
+        </div>
+      )}
     </div>
   );
 }
