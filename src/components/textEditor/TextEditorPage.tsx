@@ -7,10 +7,12 @@ import {
 import { Button, IconButton } from '../ui';
 import { swal, swalToast } from '../../lib/swalTheme';
 import { genId } from '../../lib/id';
-import { loadTextEditorDocs, saveTextEditorDocs, type TextEditorDoc } from '../../lib/textEditorStore';
+import { loadTextEditorDocs, saveTextEditorDocs, defaultDocStatus, type TextEditorDoc } from '../../lib/textEditorStore';
 import { markMisspellings, stripSpellMarks, findSpellIssues } from '../../lib/spellCheck';
 import { exportDocAsTxt, exportDocAsDocx, printDocAsPdf, downloadBlob } from '../../lib/textEditorExport';
 import { SplitScreenPreview } from './SplitScreenPreview';
+import { DocumentLibrary } from './DocumentLibrary';
+import type { TextEditorDocStatus } from '../../lib/textEditorStore';
 import { TableToolbar } from './TableToolbar';
 import { ImageControls } from './ImageControls';
 import {
@@ -66,7 +68,7 @@ const PAGE_HEIGHT = 1123;
 const AUTOSAVE_MS = 1000;
 
 function newDoc(title = 'Untitled'): TextEditorDoc {
-  return { id: genId('tedoc'), title, dir: 'ltr', pages: [''] };
+  return { id: genId('tedoc'), title, dir: 'ltr', pages: [''], updatedAt: Date.now(), status: defaultDocStatus() };
 }
 
 interface EditablePageProps {
@@ -126,6 +128,9 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
   const [tableFullySelected, setTableFullySelected] = useState(false);
   const [tableContextMenuPos, setTableContextMenuPos] = useState<{ x: number; y: number } | null>(null);
   const activeTableCellRef = useRef<HTMLTableCellElement | null>(null);
+  /** Increments across the session so a deleted-then-recreated "Document N"
+   *  never collides with an existing title, unlike a plain docs.length+1. */
+  const docCounterRef = useRef(0);
   const tableContextMenuRef = useRef<HTMLDivElement | null>(null);
   const [selectedImage, setSelectedImage] = useState<HTMLImageElement | null>(null);
   const [imageContextMenuPos, setImageContextMenuPos] = useState<{ x: number; y: number } | null>(null);
@@ -188,6 +193,10 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
       if (cancelled) return;
       const initial = saved && saved.length > 0 ? saved : [newDoc()];
       docsRef.current = initial;
+      for (const d of initial) {
+        const match = /^Document (\d+)$/.exec(d.title);
+        if (match) docCounterRef.current = Math.max(docCounterRef.current, parseInt(match[1], 10));
+      }
       setDocs(initial);
       setActiveDocId(initial[0].id);
       setLoaded(true);
@@ -215,7 +224,7 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
 
   function commitActiveDocPages(pages: string[]) {
     if (!activeDocId) return;
-    updateDocs(docsRef.current.map(d => d.id === activeDocId ? { ...d, pages } : d));
+    updateDocs(docsRef.current.map(d => d.id === activeDocId ? { ...d, pages, updatedAt: Date.now() } : d));
   }
 
   function scheduleAutosave() {
@@ -234,7 +243,8 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
    *  `dangerouslySetInnerHTML` to re-apply on the still-mounted, still-focused
    *  contentEditable node and destroy the caret (see Section 0 audit above). */
   async function flushSave(): Promise<void> {
-    const nextDocs = getDocsWithLiveContent();
+    const activeId = activeDocIdRef.current;
+    const nextDocs = getDocsWithLiveContent().map(d => d.id === activeId ? { ...d, updatedAt: Date.now() } : d);
     docsRef.current = nextDocs;
     setSaveStatus('saving');
     try {
@@ -410,7 +420,8 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
 
   function addDoc() {
     const based = getDocsWithLiveContent();
-    const doc = newDoc(`Document ${based.length + 1}`);
+    docCounterRef.current += 1;
+    const doc = newDoc(`Document ${docCounterRef.current}`);
     const next = [...based, doc];
     updateDocs(next);
     setActiveDocId(doc.id);
@@ -425,6 +436,28 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
     updateDocs(next);
     if (activeDocId === id) setActiveDocId(next[0].id);
     setRenderKey(k => k + 1);
+    saveTextEditorDocs(next).catch(console.error);
+  }
+
+  function renameDoc(id: string, title: string) {
+    const next = docsRef.current.map(d => d.id === id ? { ...d, title, updatedAt: Date.now() } : d);
+    updateDocs(next);
+    saveTextEditorDocs(next).catch(console.error);
+  }
+
+  function duplicateDoc(id: string) {
+    const based = getDocsWithLiveContent();
+    const source = based.find(d => d.id === id);
+    if (!source) return;
+    const copy: TextEditorDoc = { ...structuredClone(source), id: genId('tedoc'), title: `${source.title} copy`, updatedAt: Date.now() };
+    const next = [...based, copy];
+    updateDocs(next);
+    saveTextEditorDocs(next).catch(console.error);
+  }
+
+  function toggleDocStatus(id: string, key: keyof TextEditorDocStatus) {
+    const next = docsRef.current.map(d => d.id === id ? { ...d, status: { ...d.status, [key]: !d.status[key] } } : d);
+    updateDocs(next);
     saveTextEditorDocs(next).catch(console.error);
   }
 
@@ -790,6 +823,16 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
 
   return (
     <div className="flex h-full min-h-0">
+      <DocumentLibrary
+        docs={docs}
+        activeDocId={activeDocId}
+        onOpen={switchDoc}
+        onNew={addDoc}
+        onRename={renameDoc}
+        onDuplicate={duplicateDoc}
+        onDelete={closeDoc}
+        onToggleStatus={toggleDocStatus}
+      />
       <div className="flex flex-col flex-1 min-w-0 h-full min-h-0">
       {/* Document tabs */}
       <div className="flex items-center gap-1 px-3 h-10 shrink-0 border-b border-hairline overflow-x-auto">
