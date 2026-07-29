@@ -27,7 +27,6 @@ import type { Workspace, Chapter } from '../../types';
 const PAGE_WIDTH = 794; // A4 at 96dpi
 const PAGE_HEIGHT = 1123;
 const AUTOSAVE_MS = 1000;
-const FONT_SIZES = [8, 10, 12, 14, 18, 24, 36, 48, 72];
 const SPLIT_RATIO_KEY = 'text_editor_split_ratio';
 const MIN_SPLIT_RATIO = 0.2;
 const MAX_SPLIT_RATIO = 0.8;
@@ -432,6 +431,34 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
       (el as HTMLElement).style.fontSize = `${px}px`;
     });
     handleInput();
+  }
+
+  // Free-text font size box: accepts any typed value (not just presets), applied via the same
+  // applyFontSize() above. lastFontSizeRef is the last successfully-applied value — both the
+  // up/down step buttons' base and what an invalid typed value silently reverts to.
+  const [fontSizeInput, setFontSizeInput] = useState('12');
+  const lastFontSizeRef = useRef(12);
+  const FONT_SIZE_MIN = 1;
+  const FONT_SIZE_MAX = 999;
+  const FONT_SIZE_STEP = 1;
+
+  function commitFontSizeInput(raw: string) {
+    const parsed = Number(raw);
+    if (!raw.trim() || !Number.isFinite(parsed) || parsed < FONT_SIZE_MIN || parsed > FONT_SIZE_MAX) {
+      setFontSizeInput(String(lastFontSizeRef.current));
+      return;
+    }
+    const clamped = Math.round(parsed);
+    lastFontSizeRef.current = clamped;
+    setFontSizeInput(String(clamped));
+    applyFontSize(clamped);
+  }
+
+  function stepFontSize(delta: number) {
+    const next = Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, lastFontSizeRef.current + delta));
+    lastFontSizeRef.current = next;
+    setFontSizeInput(String(next));
+    applyFontSize(next);
   }
 
   /** Firefox uses `hiliteColor`, older Chromium builds only support `backColor` for a text
@@ -1615,15 +1642,33 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
           <option value="" disabled>Font</option>
           {[...FONT_FAMILIES, ...customFontFamilies].map(f => <option key={f} value={f}>{f}</option>)}
         </select>
-        <select
-          defaultValue=""
-          onChange={(e) => { if (e.target.value) applyFontSize(Number(e.target.value)); e.target.value = ''; }}
-          className="h-7 bg-ink/5 border border-hairline rounded-md px-1.5 text-xs text-ink w-14"
-          aria-label="Font size"
-        >
-          <option value="" disabled>Size</option>
-          {FONT_SIZES.map(s => <option key={s} value={s}>{s}</option>)}
-        </select>
+        <div className="flex items-center h-7 bg-ink/5 border border-hairline rounded-md overflow-hidden shrink-0" title="Font size">
+          <input
+            type="text"
+            inputMode="numeric"
+            aria-label="Font size"
+            value={fontSizeInput}
+            onChange={(e) => setFontSizeInput(e.target.value)}
+            onFocus={(e) => e.target.select()}
+            onBlur={(e) => commitFontSizeInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commitFontSizeInput(e.currentTarget.value); } }}
+            className="w-9 h-full bg-transparent px-1 text-xs text-ink text-center outline-none"
+          />
+          <div className="flex flex-col border-l border-hairline shrink-0">
+            <button
+              type="button" aria-label="Increase font size" onClick={() => stepFontSize(FONT_SIZE_STEP)}
+              className="h-3.5 w-4 flex items-center justify-center text-ink-faint hover:text-ink hover:bg-ink/10 leading-none"
+            >
+              <ChevronUp size={9} />
+            </button>
+            <button
+              type="button" aria-label="Decrease font size" onClick={() => stepFontSize(-FONT_SIZE_STEP)}
+              className="h-3.5 w-4 flex items-center justify-center text-ink-faint hover:text-ink hover:bg-ink/10 leading-none border-t border-hairline"
+            >
+              <ChevronDown size={9} />
+            </button>
+          </div>
+        </div>
         <input type="color" title="Text color" onChange={(e) => exec('foreColor', e.target.value)} className="w-6 h-6 rounded cursor-pointer border border-hairline bg-transparent" />
         <input type="color" title="Highlight color" defaultValue="#ffff00" onChange={(e) => applyHighlight(e.target.value)} className="w-6 h-6 rounded cursor-pointer border border-hairline bg-transparent" />
         <div className="w-px h-5 bg-hairline mx-1.5" />
