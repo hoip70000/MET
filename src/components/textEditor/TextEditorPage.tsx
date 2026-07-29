@@ -12,6 +12,7 @@ import { markMisspellings, stripSpellMarks, findSpellIssues } from '../../lib/sp
 import { exportDocAsTxt, exportDocAsDocx, printDocAsPdf, downloadBlob } from '../../lib/textEditorExport';
 import { SplitScreenPreview } from './SplitScreenPreview';
 import { TableToolbar } from './TableToolbar';
+import { ImageControls } from './ImageControls';
 import {
   insertTableHtml, findEnclosingTable, findEnclosingCell, addRow, addColumn,
   deleteRow, deleteColumn, deleteTable, restoreCaretAt, navigateCell,
@@ -126,6 +127,9 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
   const [tableContextMenuPos, setTableContextMenuPos] = useState<{ x: number; y: number } | null>(null);
   const activeTableCellRef = useRef<HTMLTableCellElement | null>(null);
   const tableContextMenuRef = useRef<HTMLDivElement | null>(null);
+  const [selectedImage, setSelectedImage] = useState<HTMLImageElement | null>(null);
+  const [imageContextMenuPos, setImageContextMenuPos] = useState<{ x: number; y: number } | null>(null);
+  const imageContextMenuRef = useRef<HTMLDivElement | null>(null);
 
   const pageRefs = useRef<(HTMLDivElement | null)[]>([]);
   const dirtyRef = useRef(false);
@@ -363,6 +367,37 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
     };
   }, [tableContextMenuPos]);
 
+  useEffect(() => {
+    if (!imageContextMenuPos) return;
+    function dismiss(e: PointerEvent) {
+      if (imageContextMenuRef.current?.contains(e.target as Node)) return;
+      setImageContextMenuPos(null);
+    }
+    function onKey(e: KeyboardEvent) { if (e.key === 'Escape') setImageContextMenuPos(null); }
+    window.addEventListener('pointerdown', dismiss);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('pointerdown', dismiss);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [imageContextMenuPos]);
+
+  // Deselecting an image on outside click is already handled inside
+  // runPageClickLogic (a click anywhere in the page that isn't the image
+  // itself clears selectedImage) — this covers clicking outside the page
+  // entirely (e.g. onto chrome/toolbars), which that handler never sees.
+  useEffect(() => {
+    if (!selectedImage) return;
+    function onPointerDown(e: PointerEvent) {
+      const target = e.target as Node;
+      if (target === selectedImage || (target instanceof Node && selectedImage.contains(target))) return;
+      const withinPage = pageRefs.current.some(el => el?.contains(target));
+      if (!withinPage) setSelectedImage(null);
+    }
+    window.addEventListener('pointerdown', onPointerDown);
+    return () => window.removeEventListener('pointerdown', onPointerDown);
+  }, [selectedImage]);
+
   function runInputLogic() {
     scheduleAutosave();
     reflow();
@@ -434,6 +469,13 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
       scheduleAutosave();
       return;
     }
+    if (target.tagName === 'IMG') {
+      setSelectedImage(target as HTMLImageElement);
+      setActiveTable(null);
+      setTableFullySelected(false);
+      return;
+    }
+    if (selectedImage) setSelectedImage(null);
     const table = findEnclosingTable(target);
     if (table) {
       setActiveTable(table);
@@ -446,7 +488,30 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
   }
   runPageClickLogicRef.current = runPageClickLogic;
 
+  function deleteSelectedImage() {
+    if (!selectedImage) return;
+    const parent = selectedImage.parentNode;
+    const nextSibling = selectedImage.nextSibling;
+    selectedImage.remove();
+    setSelectedImage(null);
+    if (parent) restoreCaretAt({ parent, nextSibling });
+    scheduleAutosave();
+    reflow();
+  }
+
   function runKeyDownLogic(e: React.KeyboardEvent) {
+    if (selectedImage) {
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault();
+        deleteSelectedImage();
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setSelectedImage(null);
+        return;
+      }
+    }
     if (!activeTable) return;
     if (e.key === 'Tab') {
       const cell = findEnclosingCell(window.getSelection()?.anchorNode ?? null);
@@ -478,14 +543,52 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
   runKeyDownLogicRef.current = runKeyDownLogic;
 
   function runContextMenuLogic(e: React.MouseEvent) {
-    const table = findEnclosingTable(e.target as Node);
+    const target = e.target as HTMLElement;
+    if (target.tagName === 'IMG') {
+      e.preventDefault();
+      setSelectedImage(target as HTMLImageElement);
+      setImageContextMenuPos({ x: e.clientX, y: e.clientY });
+      return;
+    }
+    const table = findEnclosingTable(target);
     if (!table) return;
     e.preventDefault();
     setActiveTable(table);
-    activeTableCellRef.current = findEnclosingCell(e.target as Node);
+    activeTableCellRef.current = findEnclosingCell(target);
     setTableContextMenuPos({ x: e.clientX, y: e.clientY });
   }
   runContextMenuLogicRef.current = runContextMenuLogic;
+
+  function alignSelectedImage(align: 'left' | 'center' | 'right') {
+    if (!selectedImage) return;
+    if (align === 'left') {
+      selectedImage.style.cssFloat = 'left';
+      selectedImage.style.display = 'inline-block';
+      selectedImage.style.margin = '0 8px 8px 0';
+    } else if (align === 'right') {
+      selectedImage.style.cssFloat = 'right';
+      selectedImage.style.display = 'inline-block';
+      selectedImage.style.margin = '0 0 8px 8px';
+    } else {
+      selectedImage.style.cssFloat = 'none';
+      selectedImage.style.display = 'block';
+      selectedImage.style.margin = '0 auto';
+    }
+    scheduleAutosave();
+    reflow();
+  }
+
+  async function copySelectedImage() {
+    if (!selectedImage) return;
+    try {
+      const response = await fetch(selectedImage.src);
+      const blob = await response.blob();
+      await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+      swalToast({ icon: 'success', title: 'Image copied' });
+    } catch (err) {
+      swalToast({ icon: 'error', title: err instanceof Error ? err.message : 'Could not copy image' });
+    }
+  }
 
   function tableRowActionTarget(): { row: HTMLTableRowElement } | null {
     if (!activeTable) return null;
@@ -808,6 +911,38 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
             onClick={() => { handleDeleteTableAction(); setTableContextMenuPos(null); }}
           >
             Delete Table
+          </button>
+        </div>
+      )}
+      {selectedImage && (
+        <ImageControls
+          image={selectedImage}
+          onDelete={deleteSelectedImage}
+          onResizeCommit={() => { scheduleAutosave(); reflow(); }}
+        />
+      )}
+      {imageContextMenuPos && (
+        <div
+          ref={imageContextMenuRef}
+          onPointerDown={(e) => e.stopPropagation()}
+          className="fixed z-50 bg-elevated border border-hairline rounded-md shadow-panel py-1"
+          style={{ top: imageContextMenuPos.y, left: imageContextMenuPos.x }}
+        >
+          <button className="block w-full text-left text-[12px] px-3 py-1.5 hover:bg-ink/10 text-danger whitespace-nowrap" onClick={() => { deleteSelectedImage(); setImageContextMenuPos(null); }}>
+            Delete Image
+          </button>
+          <button className="block w-full text-left text-[12px] px-3 py-1.5 hover:bg-ink/10 text-ink whitespace-nowrap" onClick={() => { void copySelectedImage(); setImageContextMenuPos(null); }}>
+            Copy Image
+          </button>
+          <div className="h-px bg-hairline my-1" />
+          <button className="block w-full text-left text-[12px] px-3 py-1.5 hover:bg-ink/10 text-ink whitespace-nowrap" onClick={() => { alignSelectedImage('left'); setImageContextMenuPos(null); }}>
+            Align Left
+          </button>
+          <button className="block w-full text-left text-[12px] px-3 py-1.5 hover:bg-ink/10 text-ink whitespace-nowrap" onClick={() => { alignSelectedImage('center'); setImageContextMenuPos(null); }}>
+            Align Center
+          </button>
+          <button className="block w-full text-left text-[12px] px-3 py-1.5 hover:bg-ink/10 text-ink whitespace-nowrap" onClick={() => { alignSelectedImage('right'); setImageContextMenuPos(null); }}>
+            Align Right
           </button>
         </div>
       )}
