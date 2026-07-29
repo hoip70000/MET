@@ -18,6 +18,9 @@ import { FONT_FAMILIES } from '../studio/studioTypes';
 import { TextEditorMenuBar } from './TextEditorMenuBar';
 import type { TextEditorMenuActions } from './textEditorMenuDefinitions';
 import { useTextEditorShortcuts } from './useTextEditorShortcuts';
+import { SendToTyperDialog, type SendToTyperChapterOption, type SendToTyperResult } from './SendToTyperDialog';
+import type { TyperSendRequest } from '../../lib/typerBridge';
+import type { Workspace } from '../../types';
 
 const PAGE_WIDTH = 794; // A4 at 96dpi
 const PAGE_HEIGHT = 1123;
@@ -29,14 +32,16 @@ function newDoc(title = 'Untitled'): TextEditorDoc {
 }
 
 interface TextEditorPageProps {
-  onSendToTyper: (script: string) => void;
-  /** Whether a Studio chapter is currently open — Send to TypeR switches the top-level view to
-   *  Library either way, but only actually lands on the Studio (where the script is waiting) if
-   *  one is; the toast wording reflects which case this is instead of always claiming success. */
-  hasActiveChapter: boolean;
+  onSendToTyper: (request: TyperSendRequest) => void;
+  /** Full workspace tree, read-only — flattened into the Send-to-TypeR dialog's chapter picker.
+   *  Nothing here is ever mutated; sending goes through onSendToTyper only. */
+  workspaces: Workspace[];
+  /** Whichever chapter the user had open in Studio most recently this session (or null), used only
+   *  to pre-select the dialog's chapter dropdown — still shown/changeable either way. */
+  activeChapterId: string | null;
 }
 
-export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPageProps) {
+export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId }: TextEditorPageProps) {
   const [docs, setDocs] = useState<TextEditorDoc[]>([]);
   const [activeDocId, setActiveDocId] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -51,6 +56,7 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
   const [currentMatchIndex, setCurrentMatchIndex] = useState(0);
   const [spellReport, setSpellReport] = useState<number | null>(null);
   const [saveState, setSaveState] = useState<'saved' | 'unsaved' | 'saving'>('saved');
+  const [sendToTyperOpen, setSendToTyperOpen] = useState(false);
 
   const pageRefs = useRef<(HTMLDivElement | null)[]>([]);
   const dirtyRef = useRef(false);
@@ -1284,21 +1290,49 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
     }
   }
 
+  /** Flattened `workspace → manga → volume → chapter` list for the Send-to-TypeR
+   *  dialog's chapter picker — that's the only place a chapter needs a globally-unique,
+   *  human-readable label; nowhere else in this file needs to look outside the current doc. */
+  const chapterOptions = useMemo<SendToTyperChapterOption[]>(() => {
+    const options: SendToTyperChapterOption[] = [];
+    for (const ws of workspaces) {
+      for (const manga of ws.mangas) {
+        for (const vol of manga.volumes) {
+          for (const ch of vol.chapters) {
+            options.push({ id: ch.id, label: `${manga.title} / ${vol.name} / ${ch.name}` });
+          }
+        }
+      }
+    }
+    return options;
+  }, [workspaces]);
+
   function handleSendToTyper() {
-    if (!activeDoc) return;
+    if (chapterOptions.length === 0) {
+      swalToast({ icon: 'info', title: 'Create a chapter in Library first' });
+      return;
+    }
+    setSendToTyperOpen(true);
+  }
+
+  /** Dialog confirm handler: builds the text for exactly the pages the user chose (never the whole
+   *  document unless "Entire Document" was actually picked) and hands the request off — nothing
+   *  is sent until this runs. */
+  function confirmSendToTyper(result: SendToTyperResult) {
     const pages = capturePagesForExport();
-    const text = pages.map((html) => {
+    const selectedPages = result.pageRange === 'all'
+      ? pages
+      : result.pageRange === 'current'
+      ? pages.slice(activePageIndex, activePageIndex + 1)
+      : pages.slice(result.pageRange.from - 1, result.pageRange.to);
+    const text = selectedPages.map((html) => {
       const container = document.createElement('div');
       container.innerHTML = stripSpellMarks(html);
       return container.innerText;
     }).join('\n');
-    onSendToTyper(text);
-    swalToast({
-      icon: 'success',
-      title: hasActiveChapter
-        ? 'Sent to TypeR — opening the Studio…'
-        : 'Sent to TypeR — open a chapter in Library to see it waiting there',
-    });
+    setSendToTyperOpen(false);
+    onSendToTyper({ chapterId: result.chapterId, text, mode: result.mode });
+    swalToast({ icon: 'success', title: 'Sent to TypeR — opening the Studio…' });
   }
 
   const toolbarButtons = useMemo(() => [
@@ -1645,6 +1679,16 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
       )}
 
       <input ref={imageInputRef} type="file" accept="image/png,image/jpeg,image/webp" className="hidden" onChange={(e) => void handleImageFileChosen(e)} />
+
+      <SendToTyperDialog
+        open={sendToTyperOpen}
+        onClose={() => setSendToTyperOpen(false)}
+        chapters={chapterOptions}
+        defaultChapterId={activeChapterId}
+        currentPageNumber={activePageIndex + 1}
+        pageCount={activeDoc?.pages.length ?? 1}
+        onConfirm={confirmSendToTyper}
+      />
     </div>
   );
 }
