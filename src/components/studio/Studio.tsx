@@ -76,6 +76,10 @@ interface StudioProps {
   /** Project > Export as .msp — the existing workspace-level .msp export (App.tsx), threaded down so
    *  it's reachable from inside a chapter without Studio needing the whole `Workspace` object itself. */
   onExportMsp?: () => void;
+  /** Reports the active page id up to App.tsx on every change — lets the standalone Text Editor's
+   *  split-screen page preview follow along live even though it's a completely separate top-level
+   *  tab with no other visibility into Studio's internal state. */
+  onActivePageChange?: (pageId: string | null) => void;
 }
 
 export function Studio(props: StudioProps) {
@@ -90,7 +94,7 @@ export function Studio(props: StudioProps) {
   );
 }
 
-function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript, onConsumePendingTyperScript, onPagesChange, onExportMsp }: StudioProps) {
+function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript, onConsumePendingTyperScript, onPagesChange, onExportMsp, onActivePageChange }: StudioProps) {
   const canvasRef = useRef<StudioCanvasHandle>(null);
   const { foreground, background, setForeground, swap: swapColors, reset: resetColors } = useColor();
   const history = useHistory();
@@ -285,6 +289,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     onToggleMultiBubble: () => setMultiBubbleMode(!multiBubbleMode),
   });
   const [activePageId, setActivePageId] = useState<string | null>(pages[0]?.id ?? null);
+  useEffect(() => { onActivePageChange?.(activePageId); }, [activePageId, onActivePageChange]);
   const [pagesManagerOpen, setPagesManagerOpen] = useState(pages.length === 0);
   const [activeTool, setActiveTool] = useState('select');
   const [showCleaned, setShowCleaned] = useState(false);

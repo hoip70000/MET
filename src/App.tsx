@@ -25,6 +25,8 @@ import { Modal, Button, Input, Textarea, GlassCard, SkeletonCard, AppContextMenu
 import { Studio } from './components/studio/Studio';
 import { StudioBuildTransition } from './components/studio/StudioBuildTransition';
 import { TextEditorPage } from './components/textEditor/TextEditorPage';
+import { applyTyperInsertMode, type TyperSendRequest } from './lib/typerBridge';
+import { loadChapterStudioData, saveChapterStudioData, createEmptyStudioData } from './lib/studioProjectStore';
 import { useAutomationEngine } from './lib/automationEngine';
 import { useCloudClient } from './lib/cloudClient';
 import { migrateWorkspace } from './lib/migrate';
@@ -50,6 +52,11 @@ export default function App() {
   const [activeMangaId, setActiveMangaId] = useState<string | null>(null);
   const [activeVolumeId, setActiveVolumeId] = useState<string | null>(null);
   const [activeChapterId, setActiveChapterId] = useState<string | null>(null);
+  // The page currently active inside Studio, live — reported up via Studio's onActivePageChange
+  // prop so the standalone Text Editor's split-screen preview (a completely separate tab) can
+  // follow along. Deliberately not reset when Studio unmounts: the last page viewed is a
+  // reasonable starting point for the preview, not a stale value to discard.
+  const [studioActivePageId, setStudioActivePageId] = useState<string | null>(null);
 
   const [activeNavigationTab, setActiveNavigationTab] = useState<NavTabId>('library');
 
@@ -123,9 +130,6 @@ export default function App() {
   const [showPrivacyModal, setShowPrivacyModal] = useState(false);
   const [showTermsModal, setShowTermsModal] = useState(false);
 
-  // Bridges "Send to TypeR" from the standalone Text Editor page into whichever chapter's
-  // Studio the user next opens — Studio consumes and clears this on mount.
-  const [pendingTyperScript, setPendingTyperScript] = useState<string | null>(null);
   // Carries a `?join=<token>` invite link into the Teams tab on load, redeemed
   // (as a join request, not an auto-join) then cleared from the URL.
   const [pendingJoinToken, setPendingJoinToken] = useState<string | null>(null);
@@ -216,6 +220,47 @@ export default function App() {
     setActiveMangaId(null);
     setActiveVolumeId(null);
     setActiveChapterId(null);
+  };
+
+  /** Opens a chapter's Studio, whatever it takes to get there from wherever the user currently
+   *  is — walks `workspaces` for the chapter's own workspace/manga/volume ancestry (only its id is
+   *  known at the call site) and sets the whole active chain plus the nav tab in one go. */
+  const navigateToChapterStudio = (chapterId: string) => {
+    for (const ws of workspaces) {
+      for (const manga of ws.mangas) {
+        for (const vol of manga.volumes) {
+          if (vol.chapters.some(c => c.id === chapterId)) {
+            setActiveWorkspaceId(ws.id);
+            setActiveMangaId(manga.id);
+            setActiveVolumeId(vol.id);
+            setActiveChapterId(chapterId);
+            setActiveNavigationTab('library');
+            return;
+          }
+        }
+      }
+    }
+  };
+
+  /** Send-to-TypeR dialog's confirm handler. `TextEditorPage` only ever renders while the nav tab
+   *  is 'text-editor', which is mutually exclusive with 'library' (the only tab Studio ever mounts
+   *  under) — so there is never a live Studio instance to hand this to directly, for *any* target
+   *  chapter, including whichever one happens to be "current." Writing straight into the target
+   *  chapter's persisted studioProjectStore data and only *then* navigating to open its Studio
+   *  sidesteps a real race a live in-Studio bridge would otherwise hit: Studio's own mount-time
+   *  effect reloads typerScript from disk, and on a fresh mount that reload finishes after any
+   *  synchronous bridge write, silently clobbering it. Writing to disk first means Studio's own
+   *  load simply picks up the already-correct value — no race. "insert-line" has no live cursor to
+   *  target either (TypeR's line position is pure in-memory Studio state, reset to 0 on every
+   *  mount) — inserting at the top is exactly where a freshly-opened TypeR session would be
+   *  sitting anyway, so `applyTyperInsertMode`'s default `atLine` of 0 is the correct target, not
+   *  an approximation. */
+  const handleSendToTyper = async (req: TyperSendRequest) => {
+    const data = await loadChapterStudioData(req.chapterId).catch(() => null);
+    const base = data ?? createEmptyStudioData();
+    const nextScript = applyTyperInsertMode(base.typerScript, req.text, req.mode);
+    await saveChapterStudioData(req.chapterId, { ...base, typerScript: nextScript, updatedAt: new Date().toISOString() }).catch(console.error);
+    navigateToChapterStudio(req.chapterId);
   };
 
   const resetToLibraryRoot = () => {
@@ -761,13 +806,12 @@ export default function App() {
           {activeNavigationTab === 'teams' && <TeamsPanel cc={cloudClient} pendingJoinToken={pendingJoinToken} onConsumedJoinToken={() => setPendingJoinToken(null)} />}
 
           {activeNavigationTab === 'text-editor' && (
-            <div className="fixed inset-0 lg:relative lg:inset-auto flex flex-col bg-[#0b0b0d] lg:rounded-2xl lg:overflow-hidden lg:border lg:border-hairline lg:h-[calc(100vh-8.5rem)] z-30">
+            <div className="fixed inset-0 lg:relative lg:inset-auto flex flex-col bg-elevated lg:rounded-2xl lg:overflow-hidden lg:border lg:border-hairline lg:h-[calc(100vh-8.5rem)] z-30">
               <TextEditorPage
-                hasActiveChapter={!!activeChapter}
-                onSendToTyper={(script) => {
-                  setPendingTyperScript(script);
-                  setActiveNavigationTab('library');
-                }}
+                workspaces={workspaces}
+                activeChapterId={activeChapterId}
+                studioActivePageId={studioActivePageId}
+                onSendToTyper={handleSendToTyper}
               />
             </div>
           )}
@@ -812,10 +856,9 @@ export default function App() {
                   chapterName={activeChapter.name}
                   pages={activeChapter.pages}
                   onBack={resetToLibraryRoot}
-                  pendingTyperScript={pendingTyperScript}
-                  onConsumePendingTyperScript={() => setPendingTyperScript(null)}
                   onPagesChange={handleChapterPagesChange}
                   onExportMsp={() => handleExportWorkspace(activeWorkspace)}
+                  onActivePageChange={setStudioActivePageId}
                 />
               )}
 

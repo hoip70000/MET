@@ -4,8 +4,10 @@ import {
   List, ListOrdered, Search, Download, FileType, Printer, Send, Heading1, Heading2,
   Cloud, CloudOff, Loader2, Heading3, Heading4, AlignJustify, IndentIncrease, IndentDecrease,
   Strikethrough, Undo2, Redo2, Languages, ChevronUp, ChevronDown, Minus, Clock,
+  Maximize2, Minimize2, Sun, Moon, Columns2, ChevronLeft, ChevronRight,
 } from 'lucide-react';
 import { Button, IconButton } from '../ui';
+import { useTheme } from '../../contexts/ThemeContext';
 import { swal, swalToast, Swal } from '../../lib/swalTheme';
 import { genId } from '../../lib/id';
 import { loadTextEditorDocs, saveTextEditorDocs, type TextEditorDoc } from '../../lib/textEditorStore';
@@ -18,25 +20,49 @@ import { FONT_FAMILIES } from '../studio/studioTypes';
 import { TextEditorMenuBar } from './TextEditorMenuBar';
 import type { TextEditorMenuActions } from './textEditorMenuDefinitions';
 import { useTextEditorShortcuts } from './useTextEditorShortcuts';
+import { SendToTyperDialog, type SendToTyperChapterOption, type SendToTyperResult } from './SendToTyperDialog';
+import type { TyperSendRequest } from '../../lib/typerBridge';
+import type { Workspace, Chapter } from '../../types';
 
 const PAGE_WIDTH = 794; // A4 at 96dpi
 const PAGE_HEIGHT = 1123;
 const AUTOSAVE_MS = 1000;
-const FONT_SIZES = [8, 10, 12, 14, 18, 24, 36, 48, 72];
+const SPLIT_RATIO_KEY = 'text_editor_split_ratio';
+const MIN_SPLIT_RATIO = 0.2;
+const MAX_SPLIT_RATIO = 0.8;
 
 function newDoc(title = 'Untitled'): TextEditorDoc {
   return { id: genId('tedoc'), title, dir: 'ltr', pages: [''] };
 }
 
-interface TextEditorPageProps {
-  onSendToTyper: (script: string) => void;
-  /** Whether a Studio chapter is currently open — Send to TypeR switches the top-level view to
-   *  Library either way, but only actually lands on the Studio (where the script is waiting) if
-   *  one is; the toast wording reflects which case this is instead of always claiming success. */
-  hasActiveChapter: boolean;
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  return `${(kb / 1024).toFixed(1)} MB`;
 }
 
-export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPageProps) {
+interface TextEditorPageProps {
+  onSendToTyper: (request: TyperSendRequest) => void;
+  /** Full workspace tree, read-only — flattened into the Send-to-TypeR dialog's chapter picker.
+   *  Nothing here is ever mutated; sending goes through onSendToTyper only. */
+  workspaces: Workspace[];
+  /** Whichever chapter the user had open in Studio most recently this session (or null), used to
+   *  pre-select the Send-to-TypeR dialog's chapter dropdown and as the split-screen preview's
+   *  default chapter — both still changeable/browsable either way. */
+  activeChapterId: string | null;
+  /** The page currently active *inside* Studio, live — null whenever Studio isn't actually mounted
+   *  (this page and Studio are mutually-exclusive tabs, so that's most of the time). Drives the
+   *  split-screen preview's initial page whenever it changes; the preview's own prev/next/page-
+   *  number controls can still browse away from it independently afterward. */
+  studioActivePageId: string | null;
+}
+
+export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, studioActivePageId }: TextEditorPageProps) {
+  // The app-wide theme (same one TopBar/SettingsPanel toggle) — not a second, editor-local theme
+  // system. Pages themselves stay bg-white/text-black regardless (see the page div's own
+  // className below), since they represent paper, not chrome.
+  const { resolvedTheme, toggleTheme } = useTheme();
   const [docs, setDocs] = useState<TextEditorDoc[]>([]);
   const [activeDocId, setActiveDocId] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -51,14 +77,116 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
   const [currentMatchIndex, setCurrentMatchIndex] = useState(0);
   const [spellReport, setSpellReport] = useState<number | null>(null);
   const [saveState, setSaveState] = useState<'saved' | 'unsaved' | 'saving'>('saved');
+  const [sendToTyperOpen, setSendToTyperOpen] = useState(false);
+
+  // Full screen: mirrors Studio.tsx's own studioRootRef/isFullscreen/toggleFullscreen idiom exactly,
+  // scoped to this component's own root instead.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  useEffect(() => {
+    function onFullscreenChange() { setIsFullscreen(document.fullscreenElement === rootRef.current); }
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
+  }, []);
+  function toggleFullscreen() {
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      rootRef.current?.requestFullscreen().catch(() => {
+        swalToast({ icon: 'error', title: "Couldn't enter fullscreen" });
+      });
+    }
+  }
+
+  // Split screen: a read-only manga-page preview alongside the editor. Split ratio is remembered
+  // per session (localStorage); split on/off itself isn't — a fresh session always starts
+  // full-width.
+  const [splitScreen, setSplitScreen] = useState(false);
+  const [splitRatio, setSplitRatio] = useState(() => {
+    const stored = Number(localStorage.getItem(SPLIT_RATIO_KEY));
+    return Number.isFinite(stored) && stored >= MIN_SPLIT_RATIO && stored <= MAX_SPLIT_RATIO ? stored : 0.5;
+  });
+
+  /** The chapter whose pages the preview shows: whichever chapter is currently associated with
+   *  Studio, falling back to the first chapter that exists anywhere, so the preview still has
+   *  something to show before the user has opened Studio at all this session. */
+  const previewChapter = useMemo(() => {
+    let fallback: Chapter | null = null;
+    for (const ws of workspaces) {
+      for (const manga of ws.mangas) {
+        for (const vol of manga.volumes) {
+          for (const ch of vol.chapters) {
+            if (ch.id === activeChapterId) return ch;
+            if (!fallback) fallback = ch;
+          }
+        }
+      }
+    }
+    return fallback;
+  }, [workspaces, activeChapterId]);
+
+  const previewPages = useMemo(
+    () => (previewChapter?.pages ?? []).map(p => p.cleaned?.dataUrl ?? p.original.dataUrl),
+    [previewChapter],
+  );
+
+  const [previewPageIndex, setPreviewPageIndex] = useState(0);
+  // Follows Studio's own live page live — but only the moment it *changes*, so browsing the
+  // preview independently afterward (via its own prev/next/page-number controls) doesn't keep
+  // getting yanked back.
+  useEffect(() => {
+    if (!studioActivePageId || !previewChapter) return;
+    const idx = previewChapter.pages.findIndex(p => p.id === studioActivePageId);
+    if (idx >= 0) setPreviewPageIndex(idx);
+  }, [studioActivePageId, previewChapter]);
+  const clampedPreviewIndex = Math.min(Math.max(previewPageIndex, 0), Math.max(0, previewPages.length - 1));
+
+  /** Drag-to-resize the split divider — the same manual pointermove/pointerup-on-window idiom
+   *  StudioCanvas.tsx's Space-hold pan and the image resize handle above already use in this
+   *  codebase, rather than Konva/native drag (neither applies to plain HTML layout). */
+  function handleSplitDividerPointerDown(e: React.PointerEvent) {
+    const container = (e.currentTarget as HTMLElement).parentElement;
+    if (!container) return;
+    const startX = e.clientX;
+    const startRatio = splitRatio;
+    const width = container.getBoundingClientRect().width;
+    function onMove(ev: PointerEvent) {
+      const next = Math.min(MAX_SPLIT_RATIO, Math.max(MIN_SPLIT_RATIO, startRatio + (ev.clientX - startX) / width));
+      setSplitRatio(next);
+      localStorage.setItem(SPLIT_RATIO_KEY, String(next));
+    }
+    function onUp() {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    }
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
 
   const pageRefs = useRef<(HTMLDivElement | null)[]>([]);
   const dirtyRef = useRef(false);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Always-current mirrors of `docs`/`activeDocId`, read from async callbacks (the debounced
+  // autosave timeout, the unmount flush) instead of the closed-over state values, which go stale
+  // the moment a callback outlives the render that created it.
+  const docsRef = useRef<TextEditorDoc[]>([]);
+  const activeDocIdRef = useRef<string | null>(null);
+  useEffect(() => { docsRef.current = docs; activeDocIdRef.current = activeDocId; }, [docs, activeDocId]);
+  // The actual source of truth for what each page's `dangerouslySetInnerHTML` renders. Deliberately
+  // NOT derived from `docs` on every render: `docs` (and thus `activeDoc.pages`) is intentionally
+  // stale while typing (see reflow()'s own comment), and autosave eventually reconciles it with the
+  // live DOM. If the page divs rendered straight from `docs`, that reconciliation would flip a
+  // page's `__html` prop from stale to live on every autosave tick, and React would reset
+  // `node.innerHTML` on the very node the user is typing into — wiping the caret, and under any
+  // timing overlap with continued typing, dropping keystrokes. Only the handful of places below
+  // that *intend* to replace on-screen content (doc load/switch/close, spell check, find & replace,
+  // version restore) may write here; autosave must only ever read the DOM, never write it.
+  const pageSeedRef = useRef<string[]>([]);
 
   useEffect(() => {
     loadTextEditorDocs().then((saved) => {
       const initial = saved && saved.length > 0 ? saved : [newDoc()];
+      pageSeedRef.current = initial[0].pages;
       setDocs(initial);
       setActiveDocId(initial[0].id);
       setLoaded(true);
@@ -84,6 +212,7 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
 
   function commitActiveDocPages(pages: string[]) {
     if (!activeDocId) return;
+    pageSeedRef.current = pages;
     setDocs(prev => prev.map(d => d.id === activeDocId ? { ...d, pages } : d));
   }
 
@@ -95,8 +224,13 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
       if (!dirtyRef.current) return;
       dirtyRef.current = false;
       setSaveState('saving');
+      // Deliberately reads live DOM + the always-current refs, not the `docs`/`activeDocId`
+      // closed over at schedule-time, and deliberately never writes `pageSeedRef` — see its own
+      // comment above. This is what keeps a debounced autosave from ever touching the on-screen
+      // contenteditable content.
+      const docId = activeDocIdRef.current;
       const pages = captureActiveDocPages();
-      const nextDocs = docs.map(d => d.id === activeDocId ? { ...d, pages } : d);
+      const nextDocs = docsRef.current.map(d => d.id === docId ? { ...d, pages } : d);
       setDocs(nextDocs);
       saveTextEditorDocs(nextDocs)
         .then(() => setSaveState('saved'))
@@ -108,7 +242,7 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
       // Every debounced autosave also pushes a capped version snapshot — the same cadence
       // studioProjectStore.ts's flushAutosave already uses for Studio (save + pushVersionSnapshot
       // back-to-back), not a separately-invented interval.
-      const activeAfterSave = nextDocs.find(d => d.id === activeDocId);
+      const activeAfterSave = nextDocs.find(d => d.id === docId);
       if (activeAfterSave) pushTextEditorVersion(activeAfterSave.id, activeAfterSave).catch(console.error);
     }, AUTOSAVE_MS);
   }
@@ -116,11 +250,11 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
   useEffect(() => () => {
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
     if (spellTimeoutRef.current) clearTimeout(spellTimeoutRef.current);
-    if (dirtyRef.current && activeDocId) {
+    const docId = activeDocIdRef.current;
+    if (dirtyRef.current && docId) {
       const pages = captureActiveDocPages();
-      saveTextEditorDocs(docs.map(d => d.id === activeDocId ? { ...d, pages } : d)).catch(console.error);
+      saveTextEditorDocs(docsRef.current.map(d => d.id === docId ? { ...d, pages } : d)).catch(console.error);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /** Block-level reflow: pushes overflowing trailing blocks to the next page, and pulls
@@ -206,12 +340,9 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
     if (neededCount !== currentCount) {
       const docId = activeDocId;
       // Rebuild from each existing page's *current live DOM content*, not the possibly-stale
-      // `d.pages` React state — React re-renders every page div in this list on a count change
-      // (even ones whose own html string didn't change), and it's this render that actually
-      // commits whatever string is in `pages[i]` back into the DOM via dangerouslySetInnerHTML.
-      // Basing the rebuilt array on stale state here would silently overwrite live, unsaved
-      // in-progress edits (e.g. a just-inserted hard-break marker) with whatever old value
-      // happened to still be sitting in state.
+      // `d.pages` React state, purely for persistence bookkeeping — page content itself no longer
+      // renders from `d.pages` (see pageSeedRef's own comment), but keeping it fresh here still
+      // matters for whatever the *next* save/export/close reads.
       const freshPages = captureActiveDocPages();
       setDocs(prev => prev.map((d) => {
         if (d.id !== docId) return d;
@@ -223,6 +354,18 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
         }
         return { ...d, pages };
       }));
+      // pageSeedRef grows/shrinks in lockstep with the page *count* so a newly-mounted page gets a
+      // seed value and a dropped one is discarded — but existing entries are left untouched (not
+      // overwritten with freshPages): this count change doesn't remount any existing page's div
+      // (only the `.map()`'s length changes), so there's nothing to re-seed for pages that are
+      // still on screen.
+      const seed = [...pageSeedRef.current];
+      if (neededCount > seed.length) {
+        while (seed.length < neededCount) seed.push('');
+      } else {
+        seed.length = Math.max(1, neededCount);
+      }
+      pageSeedRef.current = seed;
     }
   }
 
@@ -288,6 +431,34 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
       (el as HTMLElement).style.fontSize = `${px}px`;
     });
     handleInput();
+  }
+
+  // Free-text font size box: accepts any typed value (not just presets), applied via the same
+  // applyFontSize() above. lastFontSizeRef is the last successfully-applied value — both the
+  // up/down step buttons' base and what an invalid typed value silently reverts to.
+  const [fontSizeInput, setFontSizeInput] = useState('12');
+  const lastFontSizeRef = useRef(12);
+  const FONT_SIZE_MIN = 1;
+  const FONT_SIZE_MAX = 999;
+  const FONT_SIZE_STEP = 1;
+
+  function commitFontSizeInput(raw: string) {
+    const parsed = Number(raw);
+    if (!raw.trim() || !Number.isFinite(parsed) || parsed < FONT_SIZE_MIN || parsed > FONT_SIZE_MAX) {
+      setFontSizeInput(String(lastFontSizeRef.current));
+      return;
+    }
+    const clamped = Math.round(parsed);
+    lastFontSizeRef.current = clamped;
+    setFontSizeInput(String(clamped));
+    applyFontSize(clamped);
+  }
+
+  function stepFontSize(delta: number) {
+    const next = Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, lastFontSizeRef.current + delta));
+    lastFontSizeRef.current = next;
+    setFontSizeInput(String(next));
+    applyFontSize(next);
   }
 
   /** Firefox uses `hiliteColor`, older Chromium builds only support `backColor` for a text
@@ -770,6 +941,7 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
   function addDoc() {
     const doc = newDoc(`Document ${docs.length + 1}`);
     const next = [...docs, doc];
+    pageSeedRef.current = doc.pages;
     setDocs(next);
     setActiveDocId(doc.id);
     setRenderKey(k => k + 1);
@@ -787,7 +959,10 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
       : docs;
     const next = sourceDocs.filter(d => d.id !== id);
     setDocs(next);
-    if (activeDocId === id) setActiveDocId(next[0].id);
+    if (activeDocId === id) {
+      pageSeedRef.current = next[0].pages;
+      setActiveDocId(next[0].id);
+    }
     setRenderKey(k => k + 1);
     saveTextEditorDocs(next).catch(() => {
       swalToast({ icon: 'error', title: 'Could not save before closing — recent changes may be lost' });
@@ -798,6 +973,7 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
     const kept = docs.find(d => d.id === id);
     if (!kept) return;
     const sourceKept = id === activeDocId ? { ...kept, pages: captureActiveDocPages() } : kept;
+    pageSeedRef.current = sourceKept.pages;
     setDocs([sourceKept]);
     setActiveDocId(id);
     setRenderKey(k => k + 1);
@@ -806,6 +982,7 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
 
   function closeAllDocs() {
     const fresh = [newDoc()];
+    pageSeedRef.current = fresh[0].pages;
     setDocs(fresh);
     setActiveDocId(fresh[0].id);
     setRenderKey(k => k + 1);
@@ -829,6 +1006,7 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
     const sourcePages = id === activeDocId ? captureActiveDocPages() : source.pages;
     const copy: TextEditorDoc = { ...source, id: genId('tedoc'), title: `${source.title} copy`, pages: [...sourcePages] };
     const next = [...docs, copy];
+    pageSeedRef.current = copy.pages;
     setDocs(next);
     setActiveDocId(copy.id);
     setRenderKey(k => k + 1);
@@ -841,6 +1019,8 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
       setDocs(prev => prev.map(d => d.id === activeDocId ? { ...d, pages } : d));
       dirtyRef.current = false;
     }
+    const target = docs.find(d => d.id === id);
+    pageSeedRef.current = target?.pages ?? [''];
     setActiveDocId(id);
     setRenderKey(k => k + 1);
   }
@@ -921,6 +1101,34 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
     img.className = 'te-image';
     img.style.maxWidth = '100%';
     if (!insertNodeAtLastPageSelection(img, img)) return;
+    handleInput();
+  }
+
+  /** Insert > File Attachment: any file type, embedded as a data URL the same way Insert > Image
+   *  already is right above — no separate storage layer needed, since a page's content is already
+   *  just persisted HTML. Rendered as a `contenteditable="false"` "chip" (the same atomic
+   *  non-editable-inline-widget technique the resize handle overlay and page-number footer already
+   *  rely on elsewhere in this file) so it reads as one object to type around rather than editable
+   *  text. It's a real `<a href="data:...">` with a native `download` attribute, so clicking it
+   *  downloads the file with zero extra JS — no click handler needed here at all. */
+  const attachmentInputRef = useRef<HTMLInputElement>(null);
+
+  function insertFileAttachment() {
+    attachmentInputRef.current?.click();
+  }
+
+  async function handleAttachmentFileChosen(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // FileList is live — file is already snapshotted above before clearing.
+    if (!file) return;
+    const dataUrl = await readFileAsDataUrl(file);
+    const chip = document.createElement('a');
+    chip.href = dataUrl;
+    chip.download = file.name;
+    chip.contentEditable = 'false';
+    chip.className = 'te-file-chip';
+    chip.textContent = `📎 ${file.name} (${formatFileSize(file.size)})`;
+    if (!insertNodeAtLastPageSelection(chip, chip)) return;
     handleInput();
   }
 
@@ -1179,6 +1387,7 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
     if (!activeDoc) return;
     const restored = await restoreTextEditorVersion(activeDoc.id, v.id);
     if (!restored) return;
+    pageSeedRef.current = restored.pages;
     setDocs(prev => prev.map(d => d.id === activeDoc.id ? { ...d, title: restored.title, dir: restored.dir, pages: restored.pages } : d));
     setRenderKey(k => k + 1);
     scheduleAutosave();
@@ -1242,21 +1451,49 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
     }
   }
 
+  /** Flattened `workspace → manga → volume → chapter` list for the Send-to-TypeR
+   *  dialog's chapter picker — that's the only place a chapter needs a globally-unique,
+   *  human-readable label; nowhere else in this file needs to look outside the current doc. */
+  const chapterOptions = useMemo<SendToTyperChapterOption[]>(() => {
+    const options: SendToTyperChapterOption[] = [];
+    for (const ws of workspaces) {
+      for (const manga of ws.mangas) {
+        for (const vol of manga.volumes) {
+          for (const ch of vol.chapters) {
+            options.push({ id: ch.id, label: `${manga.title} / ${vol.name} / ${ch.name}` });
+          }
+        }
+      }
+    }
+    return options;
+  }, [workspaces]);
+
   function handleSendToTyper() {
-    if (!activeDoc) return;
+    if (chapterOptions.length === 0) {
+      swalToast({ icon: 'info', title: 'Create a chapter in Library first' });
+      return;
+    }
+    setSendToTyperOpen(true);
+  }
+
+  /** Dialog confirm handler: builds the text for exactly the pages the user chose (never the whole
+   *  document unless "Entire Document" was actually picked) and hands the request off — nothing
+   *  is sent until this runs. */
+  function confirmSendToTyper(result: SendToTyperResult) {
     const pages = capturePagesForExport();
-    const text = pages.map((html) => {
+    const selectedPages = result.pageRange === 'all'
+      ? pages
+      : result.pageRange === 'current'
+      ? pages.slice(activePageIndex, activePageIndex + 1)
+      : pages.slice(result.pageRange.from - 1, result.pageRange.to);
+    const text = selectedPages.map((html) => {
       const container = document.createElement('div');
       container.innerHTML = stripSpellMarks(html);
       return container.innerText;
     }).join('\n');
-    onSendToTyper(text);
-    swalToast({
-      icon: 'success',
-      title: hasActiveChapter
-        ? 'Sent to TypeR — opening the Studio…'
-        : 'Sent to TypeR — open a chapter in Library to see it waiting there',
-    });
+    setSendToTyperOpen(false);
+    onSendToTyper({ chapterId: result.chapterId, text, mode: result.mode });
+    swalToast({ icon: 'success', title: 'Sent to TypeR — opening the Studio…' });
   }
 
   const toolbarButtons = useMemo(() => [
@@ -1303,6 +1540,7 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
     applyLineSpacing,
     insertTable: () => void insertTable(),
     insertImage,
+    insertFileAttachment,
     insertHardBreak: () => {
       const focusedIndex = pageRefs.current.findIndex(el => el === document.activeElement);
       insertHardBreak(focusedIndex >= 0 ? focusedIndex : 0);
@@ -1339,7 +1577,7 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
   }
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div ref={rootRef} className="flex flex-col h-full min-h-0">
       <TextEditorMenuBar actions={menuActions} />
 
       {/* Document tabs */}
@@ -1382,6 +1620,15 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
         <IconButton size="sm" aria-label="Find & replace" onClick={() => (searchOpen ? closeFindPanel() : openFindPanel('replace'))} className={`!bg-transparent shrink-0 ${searchOpen ? '!text-accent' : ''}`}>
           <Search size={14} />
         </IconButton>
+        <IconButton size="sm" aria-label={resolvedTheme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'} title={resolvedTheme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'} onClick={toggleTheme} className="!bg-transparent shrink-0">
+          {resolvedTheme === 'dark' ? <Sun size={14} /> : <Moon size={14} />}
+        </IconButton>
+        <IconButton size="sm" aria-label={isFullscreen ? 'Exit full screen' : 'Full screen'} title={isFullscreen ? 'Exit full screen' : 'Full screen'} onClick={toggleFullscreen} className="!bg-transparent shrink-0">
+          {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+        </IconButton>
+        <IconButton size="sm" aria-label="Toggle split screen" title="Split screen: page preview" active={splitScreen} onClick={() => setSplitScreen(v => !v)} className="!bg-transparent shrink-0">
+          <Columns2 size={14} />
+        </IconButton>
       </div>
 
       {/* Formatting toolbar */}
@@ -1395,15 +1642,33 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
           <option value="" disabled>Font</option>
           {[...FONT_FAMILIES, ...customFontFamilies].map(f => <option key={f} value={f}>{f}</option>)}
         </select>
-        <select
-          defaultValue=""
-          onChange={(e) => { if (e.target.value) applyFontSize(Number(e.target.value)); e.target.value = ''; }}
-          className="h-7 bg-ink/5 border border-hairline rounded-md px-1.5 text-xs text-ink w-14"
-          aria-label="Font size"
-        >
-          <option value="" disabled>Size</option>
-          {FONT_SIZES.map(s => <option key={s} value={s}>{s}</option>)}
-        </select>
+        <div className="flex items-center h-7 bg-ink/5 border border-hairline rounded-md overflow-hidden shrink-0" title="Font size">
+          <input
+            type="text"
+            inputMode="numeric"
+            aria-label="Font size"
+            value={fontSizeInput}
+            onChange={(e) => setFontSizeInput(e.target.value)}
+            onFocus={(e) => e.target.select()}
+            onBlur={(e) => commitFontSizeInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commitFontSizeInput(e.currentTarget.value); } }}
+            className="w-9 h-full bg-transparent px-1 text-xs text-ink text-center outline-none"
+          />
+          <div className="flex flex-col border-l border-hairline shrink-0">
+            <button
+              type="button" aria-label="Increase font size" onClick={() => stepFontSize(FONT_SIZE_STEP)}
+              className="h-3.5 w-4 flex items-center justify-center text-ink-faint hover:text-ink hover:bg-ink/10 leading-none"
+            >
+              <ChevronUp size={9} />
+            </button>
+            <button
+              type="button" aria-label="Decrease font size" onClick={() => stepFontSize(-FONT_SIZE_STEP)}
+              className="h-3.5 w-4 flex items-center justify-center text-ink-faint hover:text-ink hover:bg-ink/10 leading-none border-t border-hairline"
+            >
+              <ChevronDown size={9} />
+            </button>
+          </div>
+        </div>
         <input type="color" title="Text color" onChange={(e) => exec('foreColor', e.target.value)} className="w-6 h-6 rounded cursor-pointer border border-hairline bg-transparent" />
         <input type="color" title="Highlight color" defaultValue="#ffff00" onChange={(e) => applyHighlight(e.target.value)} className="w-6 h-6 rounded cursor-pointer border border-hairline bg-transparent" />
         <div className="w-px h-5 bg-hairline mx-1.5" />
@@ -1490,41 +1755,85 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
         </div>
       )}
 
-      {/* Pages */}
-      <div className="flex-1 min-h-0 overflow-auto bg-ink/[0.03] flex flex-col items-center gap-6 py-8">
-        {activeDoc && (
-          <div key={`${activeDoc.id}-${renderKey}`} className="flex flex-col items-center gap-6" dir={activeDoc.dir}>
-            {activeDoc.pages.map((html, i) => (
-              <div key={i} className="shrink-0 relative" style={{ width: PAGE_WIDTH * zoom, height: PAGE_HEIGHT * zoom }}>
-                <div
-                  className="overflow-hidden rounded-sm shadow-2xl"
-                  style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT, transform: `scale(${zoom})`, transformOrigin: 'top left' }}
-                >
+      {/* Pages + optional split-screen page preview */}
+      <div className="flex-1 min-h-0 flex overflow-hidden">
+        <div
+          className="min-h-0 overflow-auto bg-ink/[0.03] flex flex-col items-center gap-6 py-8"
+          style={{ width: splitScreen ? `${splitRatio * 100}%` : '100%' }}
+        >
+          {activeDoc && (
+            <div key={`${activeDoc.id}-${renderKey}`} className="flex flex-col items-center gap-6" dir={activeDoc.dir}>
+              {activeDoc.pages.map((_, i) => (
+                <div key={i} className="shrink-0 relative" style={{ width: PAGE_WIDTH * zoom, height: PAGE_HEIGHT * zoom }}>
                   <div
-                    ref={(el) => { pageRefs.current[i] = el; }}
-                    contentEditable
-                    suppressContentEditableWarning
-                    spellCheck
-                    dangerouslySetInnerHTML={{ __html: html }}
-                    onInput={handleInput}
-                    onClick={handlePageClick}
-                    onKeyDown={(e) => handlePageKeyDown(e, i)}
-                    onContextMenu={(e) => {
-                      const target = e.target as HTMLElement;
-                      const cell = target.closest('td');
-                      if (cell) { e.preventDefault(); setTableMenu({ cell, x: e.clientX, y: e.clientY }); return; }
-                      if (target instanceof HTMLImageElement) { e.preventDefault(); setImageMenu({ img: target, x: e.clientX, y: e.clientY }); }
-                    }}
-                    className="te-page bg-white text-black px-16 py-16 text-[15px] leading-relaxed outline-none overflow-hidden"
-                    style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT, minHeight: PAGE_HEIGHT }}
-                  />
+                    className="overflow-hidden rounded-sm shadow-2xl"
+                    style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT, transform: `scale(${zoom})`, transformOrigin: 'top left' }}
+                  >
+                    <div
+                      ref={(el) => { pageRefs.current[i] = el; }}
+                      contentEditable
+                      suppressContentEditableWarning
+                      spellCheck
+                      dangerouslySetInnerHTML={{ __html: pageSeedRef.current[i] ?? '' }}
+                      onInput={handleInput}
+                      onClick={handlePageClick}
+                      onKeyDown={(e) => handlePageKeyDown(e, i)}
+                      onContextMenu={(e) => {
+                        const target = e.target as HTMLElement;
+                        const cell = target.closest('td');
+                        if (cell) { e.preventDefault(); setTableMenu({ cell, x: e.clientX, y: e.clientY }); return; }
+                        if (target instanceof HTMLImageElement) { e.preventDefault(); setImageMenu({ img: target, x: e.clientX, y: e.clientY }); }
+                      }}
+                      className="te-page bg-white text-black px-16 py-16 text-[15px] leading-relaxed outline-none overflow-hidden"
+                      style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT, minHeight: PAGE_HEIGHT }}
+                    />
+                  </div>
+                  <div className="absolute bottom-1 inset-x-0 text-center text-[11px] text-ink-faint pointer-events-none select-none">
+                    {i + 1} / {activeDoc.pages.length}
+                  </div>
                 </div>
-                <div className="absolute bottom-1 inset-x-0 text-center text-[11px] text-ink-faint pointer-events-none select-none">
-                  {i + 1} / {activeDoc.pages.length}
-                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {splitScreen && (
+          <>
+            <div
+              onPointerDown={handleSplitDividerPointerDown}
+              className="w-1.5 shrink-0 cursor-col-resize bg-hairline hover:bg-accent transition-colors"
+            />
+            <div className="flex-1 min-h-0 flex flex-col border-l border-hairline">
+              <div className="flex items-center justify-center gap-1.5 h-9 shrink-0 border-b border-hairline text-[11px] text-ink-faint">
+                <IconButton
+                  size="sm" aria-label="Previous page" onClick={() => setPreviewPageIndex(i => Math.max(0, i - 1))}
+                  disabled={clampedPreviewIndex <= 0} className="!bg-transparent !w-6 !h-6"
+                >
+                  <ChevronLeft size={13} />
+                </IconButton>
+                <input
+                  type="number" min={1} max={Math.max(1, previewPages.length)}
+                  value={previewPages.length > 0 ? clampedPreviewIndex + 1 : 0}
+                  onChange={(e) => setPreviewPageIndex(Math.max(0, Math.min(previewPages.length - 1, Number(e.target.value) - 1)))}
+                  className="w-11 bg-ink/5 border border-hairline rounded-md px-1 py-0.5 text-xs text-ink text-center"
+                />
+                <span>of {previewPages.length}</span>
+                <IconButton
+                  size="sm" aria-label="Next page" onClick={() => setPreviewPageIndex(i => Math.min(previewPages.length - 1, i + 1))}
+                  disabled={clampedPreviewIndex >= previewPages.length - 1} className="!bg-transparent !w-6 !h-6"
+                >
+                  <ChevronRight size={13} />
+                </IconButton>
               </div>
-            ))}
-          </div>
+              <div className="flex-1 min-h-0 overflow-auto flex items-center justify-center bg-ink/[0.03] p-4">
+                {previewPages[clampedPreviewIndex] ? (
+                  <img src={previewPages[clampedPreviewIndex]} alt={`Manga page ${clampedPreviewIndex + 1}`} className="max-w-full max-h-full object-contain shadow-2xl" />
+                ) : (
+                  <span className="text-xs text-ink-faint">No page to preview — open a chapter in Library</span>
+                )}
+              </div>
+            </div>
+          </>
         )}
       </div>
 
@@ -1603,6 +1912,17 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
       )}
 
       <input ref={imageInputRef} type="file" accept="image/png,image/jpeg,image/webp" className="hidden" onChange={(e) => void handleImageFileChosen(e)} />
+      <input ref={attachmentInputRef} type="file" className="hidden" onChange={(e) => void handleAttachmentFileChosen(e)} />
+
+      <SendToTyperDialog
+        open={sendToTyperOpen}
+        onClose={() => setSendToTyperOpen(false)}
+        chapters={chapterOptions}
+        defaultChapterId={activeChapterId}
+        currentPageNumber={activePageIndex + 1}
+        pageCount={activeDoc?.pages.length ?? 1}
+        onConfirm={confirmSendToTyper}
+      />
     </div>
   );
 }
