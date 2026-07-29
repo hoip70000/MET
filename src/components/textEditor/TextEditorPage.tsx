@@ -83,7 +83,7 @@ const EditablePage = memo(function EditablePage({ initialHtml, pageRef, onInput,
         onInput={onInput}
         onClick={onClick}
         className="te-page bg-white text-black px-16 py-16 text-[15px] leading-relaxed outline-none overflow-hidden"
-        style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT, minHeight: PAGE_HEIGHT }}
+        style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT, minHeight: PAGE_HEIGHT, colorScheme: 'light' }}
       />
     </div>
   );
@@ -518,7 +518,7 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
       )}
 
       {/* Pages */}
-      <div className="flex-1 min-h-0 overflow-auto bg-ink/[0.03] flex flex-col items-center gap-6 py-8">
+      <div className="flex-1 min-h-0 overflow-auto bg-[#e9e9ec] dark:bg-[#2a2a2a] flex flex-col items-center gap-6 py-8">
         {activeDoc && (
           <div key={`${activeDoc.id}-${renderKey}`} className="flex flex-col items-center gap-6" dir={activeDoc.dir}>
             {activeDoc.pages.map((html, i) => (
