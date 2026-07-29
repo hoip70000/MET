@@ -4,6 +4,7 @@ import {
   List, ListOrdered, Search, Download, FileType, Printer, Send, Heading1, Heading2,
   Cloud, CloudOff, Loader2, Heading3, Heading4, AlignJustify, IndentIncrease, IndentDecrease,
   Strikethrough, Undo2, Redo2, Languages, ChevronUp, ChevronDown, Minus, Clock,
+  Maximize2, Minimize2,
 } from 'lucide-react';
 import { Button, IconButton } from '../ui';
 import { swal, swalToast, Swal } from '../../lib/swalTheme';
@@ -64,6 +65,25 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId }: T
   const [spellReport, setSpellReport] = useState<number | null>(null);
   const [saveState, setSaveState] = useState<'saved' | 'unsaved' | 'saving'>('saved');
   const [sendToTyperOpen, setSendToTyperOpen] = useState(false);
+
+  // Full screen: mirrors Studio.tsx's own studioRootRef/isFullscreen/toggleFullscreen idiom exactly,
+  // scoped to this component's own root instead.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  useEffect(() => {
+    function onFullscreenChange() { setIsFullscreen(document.fullscreenElement === rootRef.current); }
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
+  }, []);
+  function toggleFullscreen() {
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      rootRef.current?.requestFullscreen().catch(() => {
+        swalToast({ icon: 'error', title: "Couldn't enter fullscreen" });
+      });
+    }
+  }
 
   const pageRefs = useRef<(HTMLDivElement | null)[]>([]);
   const dirtyRef = useRef(false);
@@ -1451,7 +1471,7 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId }: T
   }
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div ref={rootRef} className="flex flex-col h-full min-h-0">
       <TextEditorMenuBar actions={menuActions} />
 
       {/* Document tabs */}
@@ -1493,6 +1513,9 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId }: T
         </span>
         <IconButton size="sm" aria-label="Find & replace" onClick={() => (searchOpen ? closeFindPanel() : openFindPanel('replace'))} className={`!bg-transparent shrink-0 ${searchOpen ? '!text-accent' : ''}`}>
           <Search size={14} />
+        </IconButton>
+        <IconButton size="sm" aria-label={isFullscreen ? 'Exit full screen' : 'Full screen'} title={isFullscreen ? 'Exit full screen' : 'Full screen'} onClick={toggleFullscreen} className="!bg-transparent shrink-0">
+          {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
         </IconButton>
       </div>
 
