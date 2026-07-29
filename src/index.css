@@ -143,6 +143,42 @@
 }
 
 @layer utilities {
+  /* Text Editor section-level editorial status marks (textEditorMarks.ts) —
+     a subtle left-border accent plus a small margin icon. The icon is pure
+     ::before content, never a real DOM node, so it can never leak into
+     exported HTML even without stripStatusMarks() running. */
+  .te-mark-in-progress, .te-mark-finished, .te-mark-reviewed {
+    position: relative;
+    border-left-width: 3px;
+    border-left-style: solid;
+    padding-left: 8px;
+    margin-left: -11px;
+  }
+  .te-mark-in-progress { border-left-color: #0A84FF; }
+  .te-mark-finished { border-left-color: #30D158; }
+  .te-mark-reviewed { border-left-color: #BF5AF2; }
+  .te-mark-in-progress::before, .te-mark-finished::before, .te-mark-reviewed::before {
+    position: absolute;
+    left: -22px;
+    top: 2px;
+    font-size: 11px;
+    line-height: 1;
+  }
+  .te-mark-in-progress::before { content: '✎'; color: #0A84FF; }
+  .te-mark-finished::before { content: '✓'; color: #30D158; }
+  .te-mark-reviewed::before { content: '👁'; color: #BF5AF2; }
+
+  /* A horizontally-scrollable row that hides its scrollbar chrome while keeping real scroll/
+     swipe behavior — for toolbars whose buttons would otherwise overflow or wrap awkwardly on
+     narrow viewports (e.g. Library's search/Import Project/Import ZIP row). */
+  .no-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
   /* Glassmorphism materials, tinted from --color-surface so they read as
      white-based frosted glass in light mode and black-based in dark mode
      from the same rule. */

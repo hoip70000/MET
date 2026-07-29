@@ -3,16 +3,16 @@ import {
   Plus, X, Bold, Italic, Underline, AlignLeft, AlignCenter, AlignRight,
   List, ListOrdered, Search, Download, FileType, Printer, Send, Heading1, Heading2,
   Check, Loader2, AlertCircle, Circle, PanelRight, Table as TableIcon,
+  Pencil, Eye,
 } from 'lucide-react';
 import { Button, IconButton } from '../ui';
 import { swal, swalToast } from '../../lib/swalTheme';
 import { genId } from '../../lib/id';
-import { loadTextEditorDocs, saveTextEditorDocs, defaultDocStatus, type TextEditorDoc } from '../../lib/textEditorStore';
+import { loadTextEditorDocs, saveTextEditorDocs, defaultDocStatus, type TextEditorDoc, type TextEditorDocStatus } from '../../lib/textEditorStore';
 import { markMisspellings, stripSpellMarks, findSpellIssues } from '../../lib/spellCheck';
 import { exportDocAsTxt, exportDocAsDocx, printDocAsPdf, downloadBlob } from '../../lib/textEditorExport';
 import { SplitScreenPreview } from './SplitScreenPreview';
 import { DocumentLibrary } from './DocumentLibrary';
-import type { TextEditorDocStatus } from '../../lib/textEditorStore';
 import { TableToolbar } from './TableToolbar';
 import { ImageControls } from './ImageControls';
 import {
@@ -20,6 +20,7 @@ import {
   deleteRow, deleteColumn, deleteTable, restoreCaretAt, navigateCell,
   type CaretRestorePoint,
 } from '../../lib/textEditorTables';
+import { markSelectionAs, stripStatusMarks, type MarkStatus } from '../../lib/textEditorMarks';
 import type { Workspace } from '../../types';
 
 /**
@@ -135,6 +136,9 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
   const [selectedImage, setSelectedImage] = useState<HTMLImageElement | null>(null);
   const [imageContextMenuPos, setImageContextMenuPos] = useState<{ x: number; y: number } | null>(null);
   const imageContextMenuRef = useRef<HTMLDivElement | null>(null);
+  const [markMenuPos, setMarkMenuPos] = useState<{ x: number; y: number } | null>(null);
+  const markMenuRef = useRef<HTMLDivElement | null>(null);
+  const markSelectionRef = useRef<{ root: HTMLElement; range: Range } | null>(null);
 
   const pageRefs = useRef<(HTMLDivElement | null)[]>([]);
   const dirtyRef = useRef(false);
@@ -392,6 +396,21 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
     };
   }, [imageContextMenuPos]);
 
+  useEffect(() => {
+    if (!markMenuPos) return;
+    function dismiss(e: PointerEvent) {
+      if (markMenuRef.current?.contains(e.target as Node)) return;
+      setMarkMenuPos(null);
+    }
+    function onKey(e: KeyboardEvent) { if (e.key === 'Escape') setMarkMenuPos(null); }
+    window.addEventListener('pointerdown', dismiss);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('pointerdown', dismiss);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [markMenuPos]);
+
   // Deselecting an image on outside click is already handled inside
   // runPageClickLogic (a click anywhere in the page that isn't the image
   // itself clears selectedImage) — this covers clicking outside the page
@@ -584,13 +603,33 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
       return;
     }
     const table = findEnclosingTable(target);
-    if (!table) return;
-    e.preventDefault();
-    setActiveTable(table);
-    activeTableCellRef.current = findEnclosingCell(target);
-    setTableContextMenuPos({ x: e.clientX, y: e.clientY });
+    if (table) {
+      e.preventDefault();
+      setActiveTable(table);
+      activeTableCellRef.current = findEnclosingCell(target);
+      setTableContextMenuPos({ x: e.clientX, y: e.clientY });
+      return;
+    }
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed && sel.rangeCount > 0) {
+      const range = sel.getRangeAt(0);
+      const root = pageRefs.current.find((el): el is HTMLDivElement => !!el && el.contains(range.commonAncestorContainer));
+      if (root) {
+        e.preventDefault();
+        markSelectionRef.current = { root, range: range.cloneRange() };
+        setMarkMenuPos({ x: e.clientX, y: e.clientY });
+      }
+    }
   }
   runContextMenuLogicRef.current = runContextMenuLogic;
+
+  function applyMark(status: MarkStatus) {
+    const saved = markSelectionRef.current;
+    setMarkMenuPos(null);
+    if (!saved) return;
+    const count = markSelectionAs(saved.root, saved.range, status);
+    if (count > 0) scheduleAutosave();
+  }
 
   function alignSelectedImage(align: 'left' | 'center' | 'right') {
     if (!selectedImage) return;
@@ -783,7 +822,7 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
     const pages = captureActiveDocPages();
     const text = pages.map((html) => {
       const container = document.createElement('div');
-      container.innerHTML = stripSpellMarks(html);
+      container.innerHTML = stripStatusMarks(stripSpellMarks(html));
       return container.innerText;
     }).join('\n');
     onSendToTyper(text);
@@ -856,6 +895,34 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
           <Plus size={14} />
         </IconButton>
         <div className="flex-1" />
+        {activeDoc && (
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              aria-label="Toggle In Progress"
+              title="In Progress"
+              onClick={() => toggleDocStatus(activeDoc.id, 'inProgress')}
+              className={`w-4 h-4 rounded-full flex items-center justify-center ${activeDoc.status.inProgress ? 'bg-[#0A84FF] text-white' : 'bg-ink/10 text-ink-faint'}`}
+            >
+              <Pencil size={9} />
+            </button>
+            <button
+              aria-label="Toggle Finished"
+              title="Finished"
+              onClick={() => toggleDocStatus(activeDoc.id, 'finished')}
+              className={`w-4 h-4 rounded-full flex items-center justify-center ${activeDoc.status.finished ? 'bg-[#30D158] text-white' : 'bg-ink/10 text-ink-faint'}`}
+            >
+              <Check size={9} />
+            </button>
+            <button
+              aria-label="Toggle Reviewed"
+              title="Reviewed"
+              onClick={() => toggleDocStatus(activeDoc.id, 'reviewed')}
+              className={`w-4 h-4 rounded-full flex items-center justify-center ${activeDoc.status.reviewed ? 'bg-[#BF5AF2] text-white' : 'bg-ink/10 text-ink-faint'}`}
+            >
+              <Eye size={9} />
+            </button>
+          </div>
+        )}
         <span className={`flex items-center gap-1 text-[11px] shrink-0 px-1 ${saveStatusClassName}`}>
           <SaveStatusIcon size={12} className={saveStatus === 'saving' ? 'animate-spin' : ''} />
           {saveStatusLabel}
@@ -986,6 +1053,25 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: 
           </button>
           <button className="block w-full text-left text-[12px] px-3 py-1.5 hover:bg-ink/10 text-ink whitespace-nowrap" onClick={() => { alignSelectedImage('right'); setImageContextMenuPos(null); }}>
             Align Right
+          </button>
+        </div>
+      )}
+      {markMenuPos && (
+        <div
+          ref={markMenuRef}
+          onPointerDown={(e) => e.stopPropagation()}
+          className="fixed z-50 bg-elevated border border-hairline rounded-md shadow-panel py-1"
+          style={{ top: markMenuPos.y, left: markMenuPos.x }}
+        >
+          <div className="px-3 py-1 text-[10px] text-ink-faint uppercase tracking-wide whitespace-nowrap">Mark as…</div>
+          <button className="block w-full text-left text-[12px] px-3 py-1.5 hover:bg-ink/10 text-ink whitespace-nowrap" onClick={() => applyMark('inProgress')}>
+            🔵 In Progress
+          </button>
+          <button className="block w-full text-left text-[12px] px-3 py-1.5 hover:bg-ink/10 text-ink whitespace-nowrap" onClick={() => applyMark('finished')}>
+            🟢 Finished
+          </button>
+          <button className="block w-full text-left text-[12px] px-3 py-1.5 hover:bg-ink/10 text-ink whitespace-nowrap" onClick={() => applyMark('reviewed')}>
+            🟣 Reviewed
           </button>
         </div>
       )}
