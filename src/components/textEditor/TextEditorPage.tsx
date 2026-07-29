@@ -55,10 +55,27 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
   const pageRefs = useRef<(HTMLDivElement | null)[]>([]);
   const dirtyRef = useRef(false);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Always-current mirrors of `docs`/`activeDocId`, read from async callbacks (the debounced
+  // autosave timeout, the unmount flush) instead of the closed-over state values, which go stale
+  // the moment a callback outlives the render that created it.
+  const docsRef = useRef<TextEditorDoc[]>([]);
+  const activeDocIdRef = useRef<string | null>(null);
+  useEffect(() => { docsRef.current = docs; activeDocIdRef.current = activeDocId; }, [docs, activeDocId]);
+  // The actual source of truth for what each page's `dangerouslySetInnerHTML` renders. Deliberately
+  // NOT derived from `docs` on every render: `docs` (and thus `activeDoc.pages`) is intentionally
+  // stale while typing (see reflow()'s own comment), and autosave eventually reconciles it with the
+  // live DOM. If the page divs rendered straight from `docs`, that reconciliation would flip a
+  // page's `__html` prop from stale to live on every autosave tick, and React would reset
+  // `node.innerHTML` on the very node the user is typing into — wiping the caret, and under any
+  // timing overlap with continued typing, dropping keystrokes. Only the handful of places below
+  // that *intend* to replace on-screen content (doc load/switch/close, spell check, find & replace,
+  // version restore) may write here; autosave must only ever read the DOM, never write it.
+  const pageSeedRef = useRef<string[]>([]);
 
   useEffect(() => {
     loadTextEditorDocs().then((saved) => {
       const initial = saved && saved.length > 0 ? saved : [newDoc()];
+      pageSeedRef.current = initial[0].pages;
       setDocs(initial);
       setActiveDocId(initial[0].id);
       setLoaded(true);
@@ -84,6 +101,7 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
 
   function commitActiveDocPages(pages: string[]) {
     if (!activeDocId) return;
+    pageSeedRef.current = pages;
     setDocs(prev => prev.map(d => d.id === activeDocId ? { ...d, pages } : d));
   }
 
@@ -95,8 +113,13 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
       if (!dirtyRef.current) return;
       dirtyRef.current = false;
       setSaveState('saving');
+      // Deliberately reads live DOM + the always-current refs, not the `docs`/`activeDocId`
+      // closed over at schedule-time, and deliberately never writes `pageSeedRef` — see its own
+      // comment above. This is what keeps a debounced autosave from ever touching the on-screen
+      // contenteditable content.
+      const docId = activeDocIdRef.current;
       const pages = captureActiveDocPages();
-      const nextDocs = docs.map(d => d.id === activeDocId ? { ...d, pages } : d);
+      const nextDocs = docsRef.current.map(d => d.id === docId ? { ...d, pages } : d);
       setDocs(nextDocs);
       saveTextEditorDocs(nextDocs)
         .then(() => setSaveState('saved'))
@@ -108,7 +131,7 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
       // Every debounced autosave also pushes a capped version snapshot — the same cadence
       // studioProjectStore.ts's flushAutosave already uses for Studio (save + pushVersionSnapshot
       // back-to-back), not a separately-invented interval.
-      const activeAfterSave = nextDocs.find(d => d.id === activeDocId);
+      const activeAfterSave = nextDocs.find(d => d.id === docId);
       if (activeAfterSave) pushTextEditorVersion(activeAfterSave.id, activeAfterSave).catch(console.error);
     }, AUTOSAVE_MS);
   }
@@ -116,11 +139,11 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
   useEffect(() => () => {
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
     if (spellTimeoutRef.current) clearTimeout(spellTimeoutRef.current);
-    if (dirtyRef.current && activeDocId) {
+    const docId = activeDocIdRef.current;
+    if (dirtyRef.current && docId) {
       const pages = captureActiveDocPages();
-      saveTextEditorDocs(docs.map(d => d.id === activeDocId ? { ...d, pages } : d)).catch(console.error);
+      saveTextEditorDocs(docsRef.current.map(d => d.id === docId ? { ...d, pages } : d)).catch(console.error);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /** Block-level reflow: pushes overflowing trailing blocks to the next page, and pulls
@@ -206,12 +229,9 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
     if (neededCount !== currentCount) {
       const docId = activeDocId;
       // Rebuild from each existing page's *current live DOM content*, not the possibly-stale
-      // `d.pages` React state — React re-renders every page div in this list on a count change
-      // (even ones whose own html string didn't change), and it's this render that actually
-      // commits whatever string is in `pages[i]` back into the DOM via dangerouslySetInnerHTML.
-      // Basing the rebuilt array on stale state here would silently overwrite live, unsaved
-      // in-progress edits (e.g. a just-inserted hard-break marker) with whatever old value
-      // happened to still be sitting in state.
+      // `d.pages` React state, purely for persistence bookkeeping — page content itself no longer
+      // renders from `d.pages` (see pageSeedRef's own comment), but keeping it fresh here still
+      // matters for whatever the *next* save/export/close reads.
       const freshPages = captureActiveDocPages();
       setDocs(prev => prev.map((d) => {
         if (d.id !== docId) return d;
@@ -223,6 +243,18 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
         }
         return { ...d, pages };
       }));
+      // pageSeedRef grows/shrinks in lockstep with the page *count* so a newly-mounted page gets a
+      // seed value and a dropped one is discarded — but existing entries are left untouched (not
+      // overwritten with freshPages): this count change doesn't remount any existing page's div
+      // (only the `.map()`'s length changes), so there's nothing to re-seed for pages that are
+      // still on screen.
+      const seed = [...pageSeedRef.current];
+      if (neededCount > seed.length) {
+        while (seed.length < neededCount) seed.push('');
+      } else {
+        seed.length = Math.max(1, neededCount);
+      }
+      pageSeedRef.current = seed;
     }
   }
 
@@ -770,6 +802,7 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
   function addDoc() {
     const doc = newDoc(`Document ${docs.length + 1}`);
     const next = [...docs, doc];
+    pageSeedRef.current = doc.pages;
     setDocs(next);
     setActiveDocId(doc.id);
     setRenderKey(k => k + 1);
@@ -787,7 +820,10 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
       : docs;
     const next = sourceDocs.filter(d => d.id !== id);
     setDocs(next);
-    if (activeDocId === id) setActiveDocId(next[0].id);
+    if (activeDocId === id) {
+      pageSeedRef.current = next[0].pages;
+      setActiveDocId(next[0].id);
+    }
     setRenderKey(k => k + 1);
     saveTextEditorDocs(next).catch(() => {
       swalToast({ icon: 'error', title: 'Could not save before closing — recent changes may be lost' });
@@ -798,6 +834,7 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
     const kept = docs.find(d => d.id === id);
     if (!kept) return;
     const sourceKept = id === activeDocId ? { ...kept, pages: captureActiveDocPages() } : kept;
+    pageSeedRef.current = sourceKept.pages;
     setDocs([sourceKept]);
     setActiveDocId(id);
     setRenderKey(k => k + 1);
@@ -806,6 +843,7 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
 
   function closeAllDocs() {
     const fresh = [newDoc()];
+    pageSeedRef.current = fresh[0].pages;
     setDocs(fresh);
     setActiveDocId(fresh[0].id);
     setRenderKey(k => k + 1);
@@ -829,6 +867,7 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
     const sourcePages = id === activeDocId ? captureActiveDocPages() : source.pages;
     const copy: TextEditorDoc = { ...source, id: genId('tedoc'), title: `${source.title} copy`, pages: [...sourcePages] };
     const next = [...docs, copy];
+    pageSeedRef.current = copy.pages;
     setDocs(next);
     setActiveDocId(copy.id);
     setRenderKey(k => k + 1);
@@ -841,6 +880,8 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
       setDocs(prev => prev.map(d => d.id === activeDocId ? { ...d, pages } : d));
       dirtyRef.current = false;
     }
+    const target = docs.find(d => d.id === id);
+    pageSeedRef.current = target?.pages ?? [''];
     setActiveDocId(id);
     setRenderKey(k => k + 1);
   }
@@ -1179,6 +1220,7 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
     if (!activeDoc) return;
     const restored = await restoreTextEditorVersion(activeDoc.id, v.id);
     if (!restored) return;
+    pageSeedRef.current = restored.pages;
     setDocs(prev => prev.map(d => d.id === activeDoc.id ? { ...d, title: restored.title, dir: restored.dir, pages: restored.pages } : d));
     setRenderKey(k => k + 1);
     scheduleAutosave();
@@ -1494,7 +1536,7 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
       <div className="flex-1 min-h-0 overflow-auto bg-ink/[0.03] flex flex-col items-center gap-6 py-8">
         {activeDoc && (
           <div key={`${activeDoc.id}-${renderKey}`} className="flex flex-col items-center gap-6" dir={activeDoc.dir}>
-            {activeDoc.pages.map((html, i) => (
+            {activeDoc.pages.map((_, i) => (
               <div key={i} className="shrink-0 relative" style={{ width: PAGE_WIDTH * zoom, height: PAGE_HEIGHT * zoom }}>
                 <div
                   className="overflow-hidden rounded-sm shadow-2xl"
@@ -1505,7 +1547,7 @@ export function TextEditorPage({ onSendToTyper, hasActiveChapter }: TextEditorPa
                     contentEditable
                     suppressContentEditableWarning
                     spellCheck
-                    dangerouslySetInnerHTML={{ __html: html }}
+                    dangerouslySetInnerHTML={{ __html: pageSeedRef.current[i] ?? '' }}
                     onInput={handleInput}
                     onClick={handlePageClick}
                     onKeyDown={(e) => handlePageKeyDown(e, i)}
