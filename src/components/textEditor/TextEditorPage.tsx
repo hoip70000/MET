@@ -31,6 +31,13 @@ function newDoc(title = 'Untitled'): TextEditorDoc {
   return { id: genId('tedoc'), title, dir: 'ltr', pages: [''] };
 }
 
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  return `${(kb / 1024).toFixed(1)} MB`;
+}
+
 interface TextEditorPageProps {
   onSendToTyper: (request: TyperSendRequest) => void;
   /** Full workspace tree, read-only — flattened into the Send-to-TypeR dialog's chapter picker.
@@ -971,6 +978,34 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId }: T
     handleInput();
   }
 
+  /** Insert > File Attachment: any file type, embedded as a data URL the same way Insert > Image
+   *  already is right above — no separate storage layer needed, since a page's content is already
+   *  just persisted HTML. Rendered as a `contenteditable="false"` "chip" (the same atomic
+   *  non-editable-inline-widget technique the resize handle overlay and page-number footer already
+   *  rely on elsewhere in this file) so it reads as one object to type around rather than editable
+   *  text. It's a real `<a href="data:...">` with a native `download` attribute, so clicking it
+   *  downloads the file with zero extra JS — no click handler needed here at all. */
+  const attachmentInputRef = useRef<HTMLInputElement>(null);
+
+  function insertFileAttachment() {
+    attachmentInputRef.current?.click();
+  }
+
+  async function handleAttachmentFileChosen(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // FileList is live — file is already snapshotted above before clearing.
+    if (!file) return;
+    const dataUrl = await readFileAsDataUrl(file);
+    const chip = document.createElement('a');
+    chip.href = dataUrl;
+    chip.download = file.name;
+    chip.contentEditable = 'false';
+    chip.className = 'te-file-chip';
+    chip.textContent = `📎 ${file.name} (${formatFileSize(file.size)})`;
+    if (!insertNodeAtLastPageSelection(chip, chip)) return;
+    handleInput();
+  }
+
   function alignImage(img: HTMLImageElement, align: 'left' | 'center' | 'right') {
     if (align === 'center') {
       img.style.float = 'none';
@@ -1379,6 +1414,7 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId }: T
     applyLineSpacing,
     insertTable: () => void insertTable(),
     insertImage,
+    insertFileAttachment,
     insertHardBreak: () => {
       const focusedIndex = pageRefs.current.findIndex(el => el === document.activeElement);
       insertHardBreak(focusedIndex >= 0 ? focusedIndex : 0);
@@ -1679,6 +1715,7 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId }: T
       )}
 
       <input ref={imageInputRef} type="file" accept="image/png,image/jpeg,image/webp" className="hidden" onChange={(e) => void handleImageFileChosen(e)} />
+      <input ref={attachmentInputRef} type="file" className="hidden" onChange={(e) => void handleAttachmentFileChosen(e)} />
 
       <SendToTyperDialog
         open={sendToTyperOpen}

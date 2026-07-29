@@ -30,6 +30,7 @@ export interface TextEditorMenuActions {
   applyLineSpacing: (value: number) => void;
   insertTable: () => void;
   insertImage: () => void;
+  insertFileAttachment: () => void;
   insertHardBreak: () => void;
   showShortcuts: () => void;
 }
@@ -128,6 +129,7 @@ export function buildTextEditorMenus(a: TextEditorMenuActions): MenuDef[] {
       items: [
         { id: 'table', label: 'Table…', action: a.insertTable },
         { id: 'image', label: 'Image…', action: a.insertImage },
+        { id: 'attachment', label: 'File Attachment…', action: a.insertFileAttachment },
         { id: 'break', label: 'Page Break', shortcut: 'Ctrl+Enter', action: a.insertHardBreak },
         sep('sep1'),
         { id: 'ul', label: 'Bulleted List', shortcut: 'Ctrl+Shift+8', action: () => a.exec('insertUnorderedList') },
