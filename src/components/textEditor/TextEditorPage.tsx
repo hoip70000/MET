@@ -4,7 +4,7 @@ import {
   List, ListOrdered, Search, Download, FileType, Printer, Send, Heading1, Heading2,
   Cloud, CloudOff, Loader2, Heading3, Heading4, AlignJustify, IndentIncrease, IndentDecrease,
   Strikethrough, Undo2, Redo2, Languages, ChevronUp, ChevronDown, Minus, Clock,
-  Maximize2, Minimize2, Sun, Moon,
+  Maximize2, Minimize2, Sun, Moon, Columns2, ChevronLeft, ChevronRight,
 } from 'lucide-react';
 import { Button, IconButton } from '../ui';
 import { useTheme } from '../../contexts/ThemeContext';
@@ -22,12 +22,15 @@ import type { TextEditorMenuActions } from './textEditorMenuDefinitions';
 import { useTextEditorShortcuts } from './useTextEditorShortcuts';
 import { SendToTyperDialog, type SendToTyperChapterOption, type SendToTyperResult } from './SendToTyperDialog';
 import type { TyperSendRequest } from '../../lib/typerBridge';
-import type { Workspace } from '../../types';
+import type { Workspace, Chapter } from '../../types';
 
 const PAGE_WIDTH = 794; // A4 at 96dpi
 const PAGE_HEIGHT = 1123;
 const AUTOSAVE_MS = 1000;
 const FONT_SIZES = [8, 10, 12, 14, 18, 24, 36, 48, 72];
+const SPLIT_RATIO_KEY = 'text_editor_split_ratio';
+const MIN_SPLIT_RATIO = 0.2;
+const MAX_SPLIT_RATIO = 0.8;
 
 function newDoc(title = 'Untitled'): TextEditorDoc {
   return { id: genId('tedoc'), title, dir: 'ltr', pages: [''] };
@@ -45,12 +48,18 @@ interface TextEditorPageProps {
   /** Full workspace tree, read-only — flattened into the Send-to-TypeR dialog's chapter picker.
    *  Nothing here is ever mutated; sending goes through onSendToTyper only. */
   workspaces: Workspace[];
-  /** Whichever chapter the user had open in Studio most recently this session (or null), used only
-   *  to pre-select the dialog's chapter dropdown — still shown/changeable either way. */
+  /** Whichever chapter the user had open in Studio most recently this session (or null), used to
+   *  pre-select the Send-to-TypeR dialog's chapter dropdown and as the split-screen preview's
+   *  default chapter — both still changeable/browsable either way. */
   activeChapterId: string | null;
+  /** The page currently active *inside* Studio, live — null whenever Studio isn't actually mounted
+   *  (this page and Studio are mutually-exclusive tabs, so that's most of the time). Drives the
+   *  split-screen preview's initial page whenever it changes; the preview's own prev/next/page-
+   *  number controls can still browse away from it independently afterward. */
+  studioActivePageId: string | null;
 }
 
-export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId }: TextEditorPageProps) {
+export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, studioActivePageId }: TextEditorPageProps) {
   // The app-wide theme (same one TopBar/SettingsPanel toggle) — not a second, editor-local theme
   // system. Pages themselves stay bg-white/text-black regardless (see the page div's own
   // className below), since they represent paper, not chrome.
@@ -88,6 +97,71 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId }: T
         swalToast({ icon: 'error', title: "Couldn't enter fullscreen" });
       });
     }
+  }
+
+  // Split screen: a read-only manga-page preview alongside the editor. Split ratio is remembered
+  // per session (localStorage); split on/off itself isn't — a fresh session always starts
+  // full-width.
+  const [splitScreen, setSplitScreen] = useState(false);
+  const [splitRatio, setSplitRatio] = useState(() => {
+    const stored = Number(localStorage.getItem(SPLIT_RATIO_KEY));
+    return Number.isFinite(stored) && stored >= MIN_SPLIT_RATIO && stored <= MAX_SPLIT_RATIO ? stored : 0.5;
+  });
+
+  /** The chapter whose pages the preview shows: whichever chapter is currently associated with
+   *  Studio, falling back to the first chapter that exists anywhere, so the preview still has
+   *  something to show before the user has opened Studio at all this session. */
+  const previewChapter = useMemo(() => {
+    let fallback: Chapter | null = null;
+    for (const ws of workspaces) {
+      for (const manga of ws.mangas) {
+        for (const vol of manga.volumes) {
+          for (const ch of vol.chapters) {
+            if (ch.id === activeChapterId) return ch;
+            if (!fallback) fallback = ch;
+          }
+        }
+      }
+    }
+    return fallback;
+  }, [workspaces, activeChapterId]);
+
+  const previewPages = useMemo(
+    () => (previewChapter?.pages ?? []).map(p => p.cleaned?.dataUrl ?? p.original.dataUrl),
+    [previewChapter],
+  );
+
+  const [previewPageIndex, setPreviewPageIndex] = useState(0);
+  // Follows Studio's own live page live — but only the moment it *changes*, so browsing the
+  // preview independently afterward (via its own prev/next/page-number controls) doesn't keep
+  // getting yanked back.
+  useEffect(() => {
+    if (!studioActivePageId || !previewChapter) return;
+    const idx = previewChapter.pages.findIndex(p => p.id === studioActivePageId);
+    if (idx >= 0) setPreviewPageIndex(idx);
+  }, [studioActivePageId, previewChapter]);
+  const clampedPreviewIndex = Math.min(Math.max(previewPageIndex, 0), Math.max(0, previewPages.length - 1));
+
+  /** Drag-to-resize the split divider — the same manual pointermove/pointerup-on-window idiom
+   *  StudioCanvas.tsx's Space-hold pan and the image resize handle above already use in this
+   *  codebase, rather than Konva/native drag (neither applies to plain HTML layout). */
+  function handleSplitDividerPointerDown(e: React.PointerEvent) {
+    const container = (e.currentTarget as HTMLElement).parentElement;
+    if (!container) return;
+    const startX = e.clientX;
+    const startRatio = splitRatio;
+    const width = container.getBoundingClientRect().width;
+    function onMove(ev: PointerEvent) {
+      const next = Math.min(MAX_SPLIT_RATIO, Math.max(MIN_SPLIT_RATIO, startRatio + (ev.clientX - startX) / width));
+      setSplitRatio(next);
+      localStorage.setItem(SPLIT_RATIO_KEY, String(next));
+    }
+    function onUp() {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    }
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
   }
 
   const pageRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -1525,6 +1599,9 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId }: T
         <IconButton size="sm" aria-label={isFullscreen ? 'Exit full screen' : 'Full screen'} title={isFullscreen ? 'Exit full screen' : 'Full screen'} onClick={toggleFullscreen} className="!bg-transparent shrink-0">
           {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
         </IconButton>
+        <IconButton size="sm" aria-label="Toggle split screen" title="Split screen: page preview" active={splitScreen} onClick={() => setSplitScreen(v => !v)} className="!bg-transparent shrink-0">
+          <Columns2 size={14} />
+        </IconButton>
       </div>
 
       {/* Formatting toolbar */}
@@ -1633,41 +1710,85 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId }: T
         </div>
       )}
 
-      {/* Pages */}
-      <div className="flex-1 min-h-0 overflow-auto bg-ink/[0.03] flex flex-col items-center gap-6 py-8">
-        {activeDoc && (
-          <div key={`${activeDoc.id}-${renderKey}`} className="flex flex-col items-center gap-6" dir={activeDoc.dir}>
-            {activeDoc.pages.map((_, i) => (
-              <div key={i} className="shrink-0 relative" style={{ width: PAGE_WIDTH * zoom, height: PAGE_HEIGHT * zoom }}>
-                <div
-                  className="overflow-hidden rounded-sm shadow-2xl"
-                  style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT, transform: `scale(${zoom})`, transformOrigin: 'top left' }}
-                >
+      {/* Pages + optional split-screen page preview */}
+      <div className="flex-1 min-h-0 flex overflow-hidden">
+        <div
+          className="min-h-0 overflow-auto bg-ink/[0.03] flex flex-col items-center gap-6 py-8"
+          style={{ width: splitScreen ? `${splitRatio * 100}%` : '100%' }}
+        >
+          {activeDoc && (
+            <div key={`${activeDoc.id}-${renderKey}`} className="flex flex-col items-center gap-6" dir={activeDoc.dir}>
+              {activeDoc.pages.map((_, i) => (
+                <div key={i} className="shrink-0 relative" style={{ width: PAGE_WIDTH * zoom, height: PAGE_HEIGHT * zoom }}>
                   <div
-                    ref={(el) => { pageRefs.current[i] = el; }}
-                    contentEditable
-                    suppressContentEditableWarning
-                    spellCheck
-                    dangerouslySetInnerHTML={{ __html: pageSeedRef.current[i] ?? '' }}
-                    onInput={handleInput}
-                    onClick={handlePageClick}
-                    onKeyDown={(e) => handlePageKeyDown(e, i)}
-                    onContextMenu={(e) => {
-                      const target = e.target as HTMLElement;
-                      const cell = target.closest('td');
-                      if (cell) { e.preventDefault(); setTableMenu({ cell, x: e.clientX, y: e.clientY }); return; }
-                      if (target instanceof HTMLImageElement) { e.preventDefault(); setImageMenu({ img: target, x: e.clientX, y: e.clientY }); }
-                    }}
-                    className="te-page bg-white text-black px-16 py-16 text-[15px] leading-relaxed outline-none overflow-hidden"
-                    style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT, minHeight: PAGE_HEIGHT }}
-                  />
+                    className="overflow-hidden rounded-sm shadow-2xl"
+                    style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT, transform: `scale(${zoom})`, transformOrigin: 'top left' }}
+                  >
+                    <div
+                      ref={(el) => { pageRefs.current[i] = el; }}
+                      contentEditable
+                      suppressContentEditableWarning
+                      spellCheck
+                      dangerouslySetInnerHTML={{ __html: pageSeedRef.current[i] ?? '' }}
+                      onInput={handleInput}
+                      onClick={handlePageClick}
+                      onKeyDown={(e) => handlePageKeyDown(e, i)}
+                      onContextMenu={(e) => {
+                        const target = e.target as HTMLElement;
+                        const cell = target.closest('td');
+                        if (cell) { e.preventDefault(); setTableMenu({ cell, x: e.clientX, y: e.clientY }); return; }
+                        if (target instanceof HTMLImageElement) { e.preventDefault(); setImageMenu({ img: target, x: e.clientX, y: e.clientY }); }
+                      }}
+                      className="te-page bg-white text-black px-16 py-16 text-[15px] leading-relaxed outline-none overflow-hidden"
+                      style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT, minHeight: PAGE_HEIGHT }}
+                    />
+                  </div>
+                  <div className="absolute bottom-1 inset-x-0 text-center text-[11px] text-ink-faint pointer-events-none select-none">
+                    {i + 1} / {activeDoc.pages.length}
+                  </div>
                 </div>
-                <div className="absolute bottom-1 inset-x-0 text-center text-[11px] text-ink-faint pointer-events-none select-none">
-                  {i + 1} / {activeDoc.pages.length}
-                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {splitScreen && (
+          <>
+            <div
+              onPointerDown={handleSplitDividerPointerDown}
+              className="w-1.5 shrink-0 cursor-col-resize bg-hairline hover:bg-accent transition-colors"
+            />
+            <div className="flex-1 min-h-0 flex flex-col border-l border-hairline">
+              <div className="flex items-center justify-center gap-1.5 h-9 shrink-0 border-b border-hairline text-[11px] text-ink-faint">
+                <IconButton
+                  size="sm" aria-label="Previous page" onClick={() => setPreviewPageIndex(i => Math.max(0, i - 1))}
+                  disabled={clampedPreviewIndex <= 0} className="!bg-transparent !w-6 !h-6"
+                >
+                  <ChevronLeft size={13} />
+                </IconButton>
+                <input
+                  type="number" min={1} max={Math.max(1, previewPages.length)}
+                  value={previewPages.length > 0 ? clampedPreviewIndex + 1 : 0}
+                  onChange={(e) => setPreviewPageIndex(Math.max(0, Math.min(previewPages.length - 1, Number(e.target.value) - 1)))}
+                  className="w-11 bg-ink/5 border border-hairline rounded-md px-1 py-0.5 text-xs text-ink text-center"
+                />
+                <span>of {previewPages.length}</span>
+                <IconButton
+                  size="sm" aria-label="Next page" onClick={() => setPreviewPageIndex(i => Math.min(previewPages.length - 1, i + 1))}
+                  disabled={clampedPreviewIndex >= previewPages.length - 1} className="!bg-transparent !w-6 !h-6"
+                >
+                  <ChevronRight size={13} />
+                </IconButton>
               </div>
-            ))}
-          </div>
+              <div className="flex-1 min-h-0 overflow-auto flex items-center justify-center bg-ink/[0.03] p-4">
+                {previewPages[clampedPreviewIndex] ? (
+                  <img src={previewPages[clampedPreviewIndex]} alt={`Manga page ${clampedPreviewIndex + 1}`} className="max-w-full max-h-full object-contain shadow-2xl" />
+                ) : (
+                  <span className="text-xs text-ink-faint">No page to preview — open a chapter in Library</span>
+                )}
+              </div>
+            </div>
+          </>
         )}
       </div>
 

@@ -52,6 +52,11 @@ export default function App() {
   const [activeMangaId, setActiveMangaId] = useState<string | null>(null);
   const [activeVolumeId, setActiveVolumeId] = useState<string | null>(null);
   const [activeChapterId, setActiveChapterId] = useState<string | null>(null);
+  // The page currently active inside Studio, live — reported up via Studio's onActivePageChange
+  // prop so the standalone Text Editor's split-screen preview (a completely separate tab) can
+  // follow along. Deliberately not reset when Studio unmounts: the last page viewed is a
+  // reasonable starting point for the preview, not a stale value to discard.
+  const [studioActivePageId, setStudioActivePageId] = useState<string | null>(null);
 
   const [activeNavigationTab, setActiveNavigationTab] = useState<NavTabId>('library');
 
@@ -805,6 +810,7 @@ export default function App() {
               <TextEditorPage
                 workspaces={workspaces}
                 activeChapterId={activeChapterId}
+                studioActivePageId={studioActivePageId}
                 onSendToTyper={handleSendToTyper}
               />
             </div>
@@ -852,6 +858,7 @@ export default function App() {
                   onBack={resetToLibraryRoot}
                   onPagesChange={handleChapterPagesChange}
                   onExportMsp={() => handleExportWorkspace(activeWorkspace)}
+                  onActivePageChange={setStudioActivePageId}
                 />
               )}
 
