@@ -4,9 +4,10 @@ import {
   List, ListOrdered, Search, Download, FileType, Printer, Send, Heading1, Heading2,
   Cloud, CloudOff, Loader2, Heading3, Heading4, AlignJustify, IndentIncrease, IndentDecrease,
   Strikethrough, Undo2, Redo2, Languages, ChevronUp, ChevronDown, Minus, Clock,
-  Maximize2, Minimize2,
+  Maximize2, Minimize2, Sun, Moon,
 } from 'lucide-react';
 import { Button, IconButton } from '../ui';
+import { useTheme } from '../../contexts/ThemeContext';
 import { swal, swalToast, Swal } from '../../lib/swalTheme';
 import { genId } from '../../lib/id';
 import { loadTextEditorDocs, saveTextEditorDocs, type TextEditorDoc } from '../../lib/textEditorStore';
@@ -50,6 +51,10 @@ interface TextEditorPageProps {
 }
 
 export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId }: TextEditorPageProps) {
+  // The app-wide theme (same one TopBar/SettingsPanel toggle) — not a second, editor-local theme
+  // system. Pages themselves stay bg-white/text-black regardless (see the page div's own
+  // className below), since they represent paper, not chrome.
+  const { resolvedTheme, toggleTheme } = useTheme();
   const [docs, setDocs] = useState<TextEditorDoc[]>([]);
   const [activeDocId, setActiveDocId] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -1513,6 +1518,9 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId }: T
         </span>
         <IconButton size="sm" aria-label="Find & replace" onClick={() => (searchOpen ? closeFindPanel() : openFindPanel('replace'))} className={`!bg-transparent shrink-0 ${searchOpen ? '!text-accent' : ''}`}>
           <Search size={14} />
+        </IconButton>
+        <IconButton size="sm" aria-label={resolvedTheme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'} title={resolvedTheme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'} onClick={toggleTheme} className="!bg-transparent shrink-0">
+          {resolvedTheme === 'dark' ? <Sun size={14} /> : <Moon size={14} />}
         </IconButton>
         <IconButton size="sm" aria-label={isFullscreen ? 'Exit full screen' : 'Full screen'} title={isFullscreen ? 'Exit full screen' : 'Full screen'} onClick={toggleFullscreen} className="!bg-transparent shrink-0">
           {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
