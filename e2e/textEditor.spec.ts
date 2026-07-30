@@ -191,7 +191,7 @@ test('Insert Table creates a real table, Tab navigates cells and adds a row from
   await expect(page.locator('.te-page table.te-table td')).toHaveCount(4);
 
   // Tab from the last cell (row 2, col 2) adds a new row. The production Tab handler
-  // (`handlePageKeyDown` in TextEditorPage.tsx) only acts when `closestCell()` finds a `<td>`
+  // (`runKeyDownLogic` in TextEditorPage.tsx) only acts when `findEnclosingCell` finds a `<td>`
   // ancestor of the *live selection* — it does nothing if the click that was meant to focus the
   // cell didn't actually land the caret inside it, which an empty `<td>` (just a placeholder
   // `<br>`) occasionally fails to do on the first hit-test. Confirming the caret is actually in a
