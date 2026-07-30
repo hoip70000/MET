@@ -92,6 +92,17 @@ function formatFileSize(bytes: number): string {
   return `${(kb / 1024).toFixed(1)} MB`;
 }
 
+/** `command`/`blockTag` are only present on buttons with a real queryCommandState/Value-checkable
+ *  active state — Undo/Redo/Insert Table/indent/outdent have no meaningful "is this on" concept,
+ *  so they're left with neither and always render inactive. */
+interface ToolbarButtonDef {
+  icon: React.ComponentType<{ size?: number }>;
+  label: string;
+  run: () => void;
+  command?: string;
+  blockTag?: string;
+}
+
 interface EditablePageProps {
   initialHtml: string;
   pageRef: (el: HTMLDivElement | null) => void;
@@ -606,6 +617,14 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     document.execCommand(command, false, value);
   }
 
+  /** Clicking a heading button while the block is already that heading reverts it to a plain
+   *  paragraph instead of re-applying the same heading — matches every other rich text editor's
+   *  toggle convention. */
+  function toggleFormatBlock(tag: string) {
+    const current = document.queryCommandValue('formatBlock').toLowerCase();
+    exec('formatBlock', current === tag.toLowerCase() ? 'P' : tag);
+  }
+
   function activePageEl(): HTMLElement | null {
     const el = document.activeElement;
     return el instanceof HTMLElement && el.classList.contains('te-page') ? el : null;
@@ -615,6 +634,10 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
    *  the standard workaround is applying size "7" then fixing up the resulting `<font>` tag(s) to
    *  a real pixel value directly. */
   function applyFontSize(px: number) {
+    // The font-size input/steppers necessarily steal focus before this runs (typing a value,
+    // clicking a stepper button) — activePageEl() would otherwise see the input/button, not the
+    // page, and silently no-op. Restore the selection captured on the control's own mousedown.
+    if (!activePageEl()) restoreFormatSelection();
     const page = activePageEl();
     if (!page) return;
     document.execCommand('fontSize', false, '7');
@@ -780,8 +803,13 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
    *  ever runs, so reading `document.activeElement`/the live selection at that point would only
    *  ever see the menu button, never the page. */
   const lastPageSelectionRef = useRef<{ page: HTMLDivElement; range: Range } | null>(null);
+  // Bumped on every selectionchange purely to force a re-render — the toolbar reads
+  // document.queryCommandState/Value fresh at render time (see toolbarButtons' active prop
+  // below), so it has no state of its own to update; it just needs to be told when to re-check.
+  const [formatTick, setFormatTick] = useState(0);
   useEffect(() => {
     function onSelectionChange() {
+      setFormatTick(t => t + 1);
       const sel = window.getSelection();
       if (!sel || sel.rangeCount === 0) return;
       let node: Node | null = sel.getRangeAt(0).startContainer;
@@ -792,6 +820,47 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     document.addEventListener('selectionchange', onSelectionChange);
     return () => document.removeEventListener('selectionchange', onSelectionChange);
   }, []);
+
+  /** Restores the most recent real in-page selection as the live one — used by controls that
+   *  necessarily steal focus before applying (the font family/size controls below), so the
+   *  browser has something to actually apply the change to instead of nothing. */
+  function restoreLastPageSelection(): boolean {
+    const saved = lastPageSelectionRef.current;
+    if (!saved) return false;
+    saved.page.focus();
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(saved.range);
+    return true;
+  }
+
+  /** A second, deliberately *separate* snapshot from `lastPageSelectionRef` above — that one is
+   *  continuously overwritten on every `selectionchange`, which includes the one a form control
+   *  (a `<select>`, a color `<input>`) fires the instant it steals focus, collapsing the document
+   *  selection *before* that control's own `onChange` ever runs. By the time `onChange` fires,
+   *  `lastPageSelectionRef` would already hold that collapsed, useless selection instead of the
+   *  user's real one. This ref is only ever written explicitly, from a control's own `onMouseDown`
+   *  (still ahead of the focus shift, but not subject to being silently overwritten again after). */
+  const savedFormatSelectionRef = useRef<{ page: HTMLDivElement; range: Range } | null>(null);
+
+  function captureFormatSelection() {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return;
+    let node: Node | null = sel.getRangeAt(0).startContainer;
+    while (node && !(node instanceof HTMLElement)) node = node.parentNode;
+    const page = (node as HTMLElement | null)?.closest('.te-page') as HTMLDivElement | null;
+    if (page) savedFormatSelectionRef.current = { page, range: sel.getRangeAt(0).cloneRange() };
+  }
+
+  function restoreFormatSelection(): boolean {
+    const saved = savedFormatSelectionRef.current;
+    if (!saved) return false;
+    saved.page.focus();
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(saved.range);
+    return true;
+  }
 
   /** Inserts `content` directly at the last real page position via the `Range` API, rather than
    *  restoring focus/selection and going through `execCommand` — deliberately, after finding that
@@ -1882,24 +1951,24 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     swalToast({ icon: 'success', title: 'Sent to TypeR — opening the Studio…' });
   }
 
-  const toolbarButtons = useMemo(() => [
+  const toolbarButtons: ToolbarButtonDef[] = useMemo(() => [
     { icon: Undo2, label: 'Undo', run: () => exec('undo') },
     { icon: Redo2, label: 'Redo', run: () => exec('redo') },
-    { icon: Bold, label: 'Bold', run: () => exec('bold') },
-    { icon: Italic, label: 'Italic', run: () => exec('italic') },
-    { icon: Underline, label: 'Underline', run: () => exec('underline') },
-    { icon: Strikethrough, label: 'Strikethrough', run: () => exec('strikeThrough') },
-    { icon: Heading1, label: 'Heading 1', run: () => exec('formatBlock', 'H1') },
-    { icon: Heading2, label: 'Heading 2', run: () => exec('formatBlock', 'H2') },
-    { icon: Heading3, label: 'Heading 3', run: () => exec('formatBlock', 'H3') },
-    { icon: Heading4, label: 'Heading 4', run: () => exec('formatBlock', 'H4') },
-    { icon: List, label: 'Bulleted list', run: () => exec('insertUnorderedList') },
-    { icon: ListOrdered, label: 'Numbered list', run: () => exec('insertOrderedList') },
-    { icon: AlignLeft, label: 'Align left', run: () => exec('justifyLeft') },
-    { icon: AlignCenter, label: 'Align center', run: () => exec('justifyCenter') },
-    { icon: AlignRight, label: 'Align right', run: () => exec('justifyRight') },
+    { icon: Bold, label: 'Bold', run: () => exec('bold'), command: 'bold' },
+    { icon: Italic, label: 'Italic', run: () => exec('italic'), command: 'italic' },
+    { icon: Underline, label: 'Underline', run: () => exec('underline'), command: 'underline' },
+    { icon: Strikethrough, label: 'Strikethrough', run: () => exec('strikeThrough'), command: 'strikeThrough' },
+    { icon: Heading1, label: 'Heading 1', run: () => toggleFormatBlock('H1'), blockTag: 'H1' },
+    { icon: Heading2, label: 'Heading 2', run: () => toggleFormatBlock('H2'), blockTag: 'H2' },
+    { icon: Heading3, label: 'Heading 3', run: () => toggleFormatBlock('H3'), blockTag: 'H3' },
+    { icon: Heading4, label: 'Heading 4', run: () => toggleFormatBlock('H4'), blockTag: 'H4' },
+    { icon: List, label: 'Bulleted list', run: () => exec('insertUnorderedList'), command: 'insertUnorderedList' },
+    { icon: ListOrdered, label: 'Numbered list', run: () => exec('insertOrderedList'), command: 'insertOrderedList' },
+    { icon: AlignLeft, label: 'Align left', run: () => exec('justifyLeft'), command: 'justifyLeft' },
+    { icon: AlignCenter, label: 'Align center', run: () => exec('justifyCenter'), command: 'justifyCenter' },
+    { icon: AlignRight, label: 'Align right', run: () => exec('justifyRight'), command: 'justifyRight' },
     { icon: TableIcon, label: 'Insert Table', run: () => void handleInsertTable() },
-    { icon: AlignJustify, label: 'Justify', run: () => exec('justifyFull') },
+    { icon: AlignJustify, label: 'Justify', run: () => exec('justifyFull'), command: 'justifyFull' },
     { icon: IndentIncrease, label: 'Increase indent', run: () => exec('indent') },
     { icon: IndentDecrease, label: 'Decrease indent', run: () => exec('outdent') },
   ], []);
@@ -2065,7 +2134,14 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
       <div className="flex items-center gap-0.5 px-3 h-11 shrink-0 border-b border-hairline overflow-x-auto">
         <select
           defaultValue=""
-          onChange={(e) => { if (e.target.value) exec('fontName', e.target.value); e.target.value = ''; }}
+          onMouseDown={captureFormatSelection}
+          onChange={(e) => {
+            // Opening/using the dropdown steals focus from the page, same issue font size has —
+            // restore the selection captured on this control's own mousedown, above, before it
+            // had the chance to steal focus.
+            if (e.target.value) { restoreFormatSelection(); exec('fontName', e.target.value); }
+            e.target.value = '';
+          }}
           className="h-7 bg-ink/5 border border-hairline rounded-md px-1.5 text-xs text-ink"
           aria-label="Font family"
         >
@@ -2078,6 +2154,7 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
             inputMode="numeric"
             aria-label="Font size"
             value={fontSizeInput}
+            onMouseDown={captureFormatSelection}
             onChange={(e) => setFontSizeInput(e.target.value)}
             onFocus={(e) => e.target.select()}
             onBlur={(e) => commitFontSizeInput(e.target.value)}
@@ -2086,32 +2163,49 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
           />
           <div className="flex flex-col border-l border-hairline shrink-0">
             <button
-              type="button" aria-label="Increase font size" onClick={() => stepFontSize(FONT_SIZE_STEP)}
+              type="button" aria-label="Increase font size" onMouseDown={captureFormatSelection} onClick={() => stepFontSize(FONT_SIZE_STEP)}
               className="h-3.5 w-4 flex items-center justify-center text-ink-faint hover:text-ink hover:bg-ink/10 leading-none"
             >
               <ChevronUp size={9} />
             </button>
             <button
-              type="button" aria-label="Decrease font size" onClick={() => stepFontSize(-FONT_SIZE_STEP)}
+              type="button" aria-label="Decrease font size" onMouseDown={captureFormatSelection} onClick={() => stepFontSize(-FONT_SIZE_STEP)}
               className="h-3.5 w-4 flex items-center justify-center text-ink-faint hover:text-ink hover:bg-ink/10 leading-none border-t border-hairline"
             >
               <ChevronDown size={9} />
             </button>
           </div>
         </div>
-        <input type="color" title="Text color" onChange={(e) => exec('foreColor', e.target.value)} className="w-6 h-6 rounded cursor-pointer border border-hairline bg-transparent" />
-        <input type="color" title="Highlight color" defaultValue="#ffff00" onChange={(e) => applyHighlight(e.target.value)} className="w-6 h-6 rounded cursor-pointer border border-hairline bg-transparent" />
+        <input type="color" title="Text color" onMouseDown={captureFormatSelection} onChange={(e) => { restoreFormatSelection(); exec('foreColor', e.target.value); }} className="w-6 h-6 rounded cursor-pointer border border-hairline bg-transparent" />
+        <input type="color" title="Highlight color" defaultValue="#ffff00" onMouseDown={captureFormatSelection} onChange={(e) => { restoreFormatSelection(); applyHighlight(e.target.value); }} className="w-6 h-6 rounded cursor-pointer border border-hairline bg-transparent" />
         <div className="w-px h-5 bg-hairline mx-1.5" />
-        {toolbarButtons.map(({ icon: Icon, label, run }) => (
-          <IconButton key={label} size="sm" aria-label={label} title={label} onClick={run} className="!bg-transparent">
-            <Icon size={14} />
-          </IconButton>
-        ))}
+        {toolbarButtons.map(({ icon: Icon, label, run, command, blockTag }) => {
+          const active = command
+            ? document.queryCommandState(command)
+            : blockTag
+            ? document.queryCommandValue('formatBlock').toLowerCase() === blockTag.toLowerCase()
+            : false;
+          return (
+            <IconButton
+              key={label}
+              size="sm"
+              aria-label={label}
+              title={label}
+              active={active}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={run}
+              className="!bg-transparent"
+            >
+              <Icon size={14} />
+            </IconButton>
+          );
+        })}
         <IconButton
           size="sm"
           aria-label="Right to left"
           title="Toggle Right-to-Left"
           active={activeDoc?.dir === 'rtl'}
+          onMouseDown={(e) => e.preventDefault()}
           onClick={toggleDir}
           className="!bg-transparent"
         >
