@@ -806,7 +806,7 @@ export default function App() {
           {activeNavigationTab === 'teams' && <TeamsPanel cc={cloudClient} pendingJoinToken={pendingJoinToken} onConsumedJoinToken={() => setPendingJoinToken(null)} />}
 
           {activeNavigationTab === 'text-editor' && (
-            <div className="fixed inset-0 lg:relative lg:inset-auto flex flex-col bg-[#e9e9ec] dark:bg-[#1c1c1e] lg:rounded-2xl lg:overflow-hidden lg:border lg:border-hairline lg:h-[calc(100vh-8.5rem)] z-30">
+            <div className="fixed inset-0 lg:relative lg:inset-auto flex flex-col bg-[#e5e7eb] dark:bg-[#1e1e1e] lg:rounded-2xl lg:overflow-hidden lg:border lg:border-hairline lg:h-[calc(100vh-8.5rem)] z-30">
               <TextEditorPage
                 workspaces={workspaces}
                 activeChapterId={activeChapterId}

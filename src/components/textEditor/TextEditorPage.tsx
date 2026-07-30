@@ -2186,7 +2186,7 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
       )}
 
       {/* Pages */}
-      <div className="flex-1 min-h-0 overflow-auto bg-[#e9e9ec] dark:bg-[#2a2a2a] flex flex-col items-center gap-6 py-8">
+      <div className="flex-1 min-h-0 overflow-auto bg-[#e5e7eb] dark:bg-[#1e1e1e] flex flex-col items-center gap-6 py-8">
         {activeDoc && (
           <div key={`${activeDoc.id}-${renderKey}`} className="flex flex-col items-center gap-6" dir={activeDoc.dir}>
             {activeDoc.pages.map((html, i) => (
