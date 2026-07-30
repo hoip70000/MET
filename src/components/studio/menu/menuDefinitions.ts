@@ -315,6 +315,7 @@ export function buildMenus(a: MenuActions): MenuDef[] {
       label: 'Layer',
       items: [
         { id: 'add-layer', label: 'New Layer', shortcut: 'Ctrl+Shift+N', action: a.addLayer },
+        { id: 'add-layer', label: 'New Layer', action: a.addLayer },
         { id: 'add-blank-layer', label: 'New Blank Layer', action: a.addBlankLayer },
         { id: 'duplicate-layer', label: 'Duplicate Layer', action: a.duplicateLayer, disabled: !a.hasActiveLayer },
         { id: 'delete-layer', label: 'Delete Layer', action: a.deleteLayer, disabled: !a.hasActiveLayer },
@@ -415,6 +416,7 @@ export function buildMenus(a: MenuActions): MenuDef[] {
         { id: 'hide-panels', label: 'Hide All Panels', shortcut: 'Tab', action: a.togglePanelsHidden, checked: a.panelsHidden },
         { id: 'fullscreen', label: 'Full Screen', shortcut: 'Ctrl+Shift+F', action: a.toggleFullscreen, checked: a.isFullscreen },
         { id: 'sep3', label: '', separator: true },
+        { id: 'sep2', label: '', separator: true },
         { id: 'typer-floating', label: 'Float TypeR', action: a.toggleTyperFloating, checked: a.typerFloating },
       ],
     },

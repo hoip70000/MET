@@ -4,8 +4,9 @@ import {
   Users, ImagePlus, Plus, Mail, Check, X, Crown, ShieldCheck, ArrowUpCircle, ArrowDownCircle, UserMinus,
   Send, ListTodo, Paperclip, CalendarClock, Trash2, Wallet, Flame, Trophy, BarChart3, Link as LinkIcon,
   ThumbsUp, ThumbsDown, Pencil, LogOut, Clock3, PiggyBank, Home, MessageCircle, Globe, Lock, ArrowLeft, UserPlus,
-  Megaphone, AlertTriangle, ChevronDown,
+  Megaphone, AlertTriangle, ChevronDown, Boxes, Mic,
 } from 'lucide-react';
+import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import { GlassCard, Button, Input, Textarea, Modal, Switch, SkeletonCard, SkeletonRow } from './ui';
 import { TeamUploadModal, type TeamUploadMeta } from './TeamUploadModal';
 import { swal, swalToast, confirmAction } from '../lib/swalTheme';
@@ -20,14 +21,15 @@ import {
   createTeam, getMyOwnedTeam, getMyMembership, getPendingInvitesForMe,
   inviteMember, acceptInvite, declineInvite, listTeamMembers, updateMemberFields,
   promoteToLeader, demoteToMember, removeMember, getLeaderboard,
-  updateTeamSettings, deleteTeam, broadcastToTeam, updateMyNotificationPrefs,
+  updateTeamSettings, deleteTeam, broadcastToTeam, updateMyNotificationPrefs, updateMyNotificationCategory, updateMyPrivacyPrefs,
+  setMemberVerified, listMyMemberships, getActiveTeamId, setActiveTeamId,
   TeamCustomPermissionDef, TeamCustomPermissionGrant,
   listCustomPermissionDefs, createCustomPermissionDef, deleteCustomPermissionDef,
   listCustomPermissionGrants, grantCustomPermission, revokeCustomPermission,
 } from '../lib/teams';
 import {
   Task, TaskPriority, TaskStatus, TaskAttachment, createTaskWithWorkflow, listTeamTasks, listMyTasks, deleteTask, attachFileToTask, listTaskAttachments,
-  setTeamTelegramChannel, acceptTask, declineTask, submitTask, approveTask, rejectSubmission,
+  setTeamTelegramChannel, acceptTask, declineTask, submitTask, approveTask, rejectSubmission, markTaskUnsuccessful,
   checkIn, setMemberActive, expireStaleOffers, reassignMemberTasks, notifyUpcomingTaskDeadlines, spawnRecurringTasks,
   TaskChecklistItem, listChecklistItems, addChecklistItem, toggleChecklistItem, deleteChecklistItem,
   TaskHistoryEntry, listTaskHistory,
@@ -54,8 +56,13 @@ import {
   editTeamMessage, deleteTeamMessage, pinTeamMessage, editDirectMessage, deleteDirectMessage,
   listReactions, subscribeToReactions, toggleReaction, MessageReaction,
   parseMentions, subscribeToTyping, markTeamChatRead, getTeamChatUnreadCount,
+  reportMessage,
 } from '../lib/chat';
 import { notify } from '../lib/notifications';
+import { dominantColorFromImage } from '../lib/color';
+import { renderMarkdownMessage } from '../lib/miniMarkdown';
+import { useChatBubbleMenu, ChatBubbleIcons } from './ChatBubbleMenu';
+import { subscribeToTeamPresence, subscribeToGlobalPresence } from '../lib/presence';
 import { requestOwnerTransfer, decideOwnerTransfer, getMyPendingOwnerTransfers, OwnerTransferRequest } from '../lib/ownerTransfer';
 import { listTeamBadges, TeamBadge, listMemberBadges, MemberBadge } from '../lib/teamBadges';
 import { getCurrentSeasonLeaderboard, closeCurrentSeason, SeasonLeaderboardRow } from '../lib/seasons';
@@ -379,7 +386,8 @@ function DashboardSection({ team, myMember, canManage, members, onChanged }: { t
         </GlassCard>
       )}
 
-      {myMember && <MyNotificationPrefsCard team={team} myMember={myMember} onChanged={onChanged} />}
+      {myMember && <MyNotificationPrefsCard team={team} myMember={myMember} />}
+      {myMember && <MyPrivacyPrefsCard team={team} myMember={myMember} />}
 
       {myMember && <MyJobsCard team={team} />}
 
@@ -544,27 +552,124 @@ function TeamActivityFeed({ team }: { team: Team }) {
   );
 }
 
-function MyNotificationPrefsCard({ team, myMember, onChanged }: { team: Team; myMember: TeamMember; onChanged: () => void }) {
-  const prefs = { broadcasts: true, tasks: true, chat: true, ...myMember.notification_prefs };
+// Deliberately self-contained: this used to take the same `onChanged` callback every other
+// team-data-mutating action does, which refetches/re-renders the *entire* team dashboard
+// (members, tasks, wallet, everything) for what's actually a small, purely personal
+// preference flip — visibly janky for something this low-stakes. It now holds its own local
+// state and applies each change optimistically (update locally, save in the background, roll
+// back only on a real failure), so toggling an option never touches anything outside this card.
+function MyNotificationPrefsCard({ team, myMember }: { team: Team; myMember: TeamMember }) {
+  const [prefs, setPrefs] = useState(myMember.notification_prefs ?? {});
+  const chat = { mode: 'all' as const, channel: 'in_app' as const, ...prefs.chat };
+  const tasks = { enabled: true, channel: 'in_app' as const, ...prefs.tasks };
 
-  const handleToggle = async (key: 'broadcasts' | 'tasks' | 'chat', value: boolean) => {
+  const handleToggleBroadcasts = async (value: boolean) => {
+    setPrefs(p => ({ ...p, broadcasts: value }));
+    const error = await updateMyNotificationPrefs(team.id, { broadcasts: value });
+    if (error) {
+      swal({ icon: 'error', title: 'Could not save', text: error });
+      setPrefs(p => ({ ...p, broadcasts: !value }));
+    }
+  };
+
+  const handleChatPatch = async (patch: Partial<typeof chat>) => {
+    const previous = prefs.chat;
+    setPrefs(p => ({ ...p, chat: { ...p.chat, ...patch } }));
+    const error = await updateMyNotificationCategory(team.id, 'chat', patch);
+    if (error) {
+      swal({ icon: 'error', title: 'Could not save', text: error });
+      setPrefs(p => ({ ...p, chat: previous }));
+    }
+  };
+
+  const handleTasksPatch = async (patch: Partial<typeof tasks>) => {
+    const previous = prefs.tasks;
+    setPrefs(p => ({ ...p, tasks: { ...p.tasks, ...patch } }));
+    const error = await updateMyNotificationCategory(team.id, 'tasks', patch);
+    if (error) {
+      swal({ icon: 'error', title: 'Could not save', text: error });
+      setPrefs(p => ({ ...p, tasks: previous }));
+    }
+  };
+
+  return (
+    <GlassCard className="p-6 space-y-4">
+      <h3 className="text-sm font-semibold text-ink">My Notifications</h3>
+
+      <div className="flex items-center justify-between">
+        <span className="text-sm text-ink-muted">Team broadcasts</span>
+        <Switch checked={prefs.broadcasts !== false} onChange={handleToggleBroadcasts} />
+      </div>
+
+      <div className="space-y-2 border-t border-hairline pt-3">
+        <div className="flex items-center justify-between">
+          <span className="text-sm text-ink-muted">Chat messages</span>
+          <div className="flex items-center gap-1.5">
+            <select
+              className="text-xs rounded-lg border border-hairline bg-ink/5 px-2 py-1 text-ink"
+              value={chat.mode}
+              onChange={e => handleChatPatch({ mode: e.target.value as 'all' | 'mentions_dms' })}
+            >
+              <option value="all">Every message</option>
+              <option value="mentions_dms">Mentions &amp; DMs only</option>
+            </select>
+            <select
+              className="text-xs rounded-lg border border-hairline bg-ink/5 px-2 py-1 text-ink"
+              value={chat.channel}
+              onChange={e => handleChatPatch({ channel: e.target.value as 'in_app' | 'in_app_push' })}
+            >
+              <option value="in_app">In-app only</option>
+              <option value="in_app_push">In-app + Web</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between">
+          <span className="text-sm text-ink-muted">Task assignments</span>
+          <div className="flex items-center gap-1.5">
+            <Switch checked={tasks.enabled !== false} onChange={v => handleTasksPatch({ enabled: v })} />
+            <select
+              className="text-xs rounded-lg border border-hairline bg-ink/5 px-2 py-1 text-ink disabled:opacity-40"
+              value={tasks.channel}
+              disabled={tasks.enabled === false}
+              onChange={e => handleTasksPatch({ channel: e.target.value as 'in_app' | 'in_app_push' })}
+            >
+              <option value="in_app">In-app only</option>
+              <option value="in_app_push">In-app + Web</option>
+            </select>
+          </div>
+        </div>
+      </div>
+    </GlassCard>
+  );
+}
+
+// Same self-contained/optimistic treatment as MyNotificationPrefsCard above, for the same reason.
+function MyPrivacyPrefsCard({ team, myMember }: { team: Team; myMember: TeamMember }) {
+  const [prefs, setPrefs] = useState({ hide_status: false, hide_balance: false, hide_active: false, ...myMember.privacy_prefs });
+
+  const handleToggle = async (key: 'hide_status' | 'hide_balance' | 'hide_active', value: boolean) => {
+    const previous = prefs[key];
     const next = { ...prefs, [key]: value };
-    const error = await updateMyNotificationPrefs(team.id, next);
-    if (error) { swal({ icon: 'error', title: 'Could not save', text: error }); return; }
-    onChanged();
+    setPrefs(next);
+    const error = await updateMyPrivacyPrefs(team.id, next);
+    if (error) {
+      swal({ icon: 'error', title: 'Could not save', text: error });
+      setPrefs(p => ({ ...p, [key]: previous }));
+    }
   };
 
   return (
     <GlassCard className="p-6 space-y-3">
-      <h3 className="text-sm font-semibold text-ink">My Notifications</h3>
+      <h3 className="text-sm font-semibold text-ink">My Privacy</h3>
       {([
-        ['broadcasts', 'Team broadcasts'],
-        ['tasks', 'New task assignments'],
-        ['chat', 'Chat messages'],
+        ['hide_active', 'Hide my online/active status'],
+        ['hide_status', 'Hide my member status (on leave, etc.)'],
+        ['hide_balance', 'Hide my bank balance from others'],
       ] as const).map(([key, label]) => (
         <div key={key} className="flex items-center justify-between">
           <span className="text-sm text-ink-muted">{label}</span>
-          <Switch checked={prefs[key] !== false} onChange={v => handleToggle(key, v)} />
+          <Switch checked={!!prefs[key]} onChange={v => handleToggle(key, v)} />
         </div>
       ))}
     </GlassCard>
@@ -743,6 +848,18 @@ function EditMemberModal({ member, teamId, isOwner, onClose, onSaved }: { member
     setCustomPermInput('');
   };
 
+  const [verified, setVerified] = useState(member.is_verified);
+  const [verifiedBusy, setVerifiedBusy] = useState(false);
+
+  const handleToggleVerified = async (next: boolean) => {
+    if (!member.user_id) return;
+    setVerifiedBusy(true);
+    const error = await setMemberVerified(teamId, member.user_id, next);
+    setVerifiedBusy(false);
+    if (error) { swal({ icon: 'error', title: 'Could not update', text: error }); return; }
+    setVerified(next);
+  };
+
   const handleSave = async () => {
     setSaving(true);
     const error = await updateMemberFields(member.id, {
@@ -780,6 +897,12 @@ function EditMemberModal({ member, teamId, isOwner, onClose, onSaved }: { member
           <label className="text-xs text-accent font-semibold">Display title (e.g. "Bank Officer")</label>
           <Input value={customTitle} onChange={e => setCustomTitle(e.target.value)} placeholder="Optional" />
         </div>
+        {isOwner && (
+          <div className="flex items-center justify-between gap-3 p-2.5 rounded-xl bg-ink/5 border border-hairline">
+            <span className="flex items-center gap-1.5 text-xs font-semibold text-ink"><ShieldCheck size={13} className="text-accent" /> Verified</span>
+            <Switch checked={verified} onChange={handleToggleVerified} disabled={verifiedBusy} />
+          </div>
+        )}
 
         <div className="space-y-1.5 pt-2 border-t border-hairline">
           <label className="text-xs text-accent font-semibold">Jobs &amp; Priorities</label>
@@ -1191,6 +1314,7 @@ function AdminTeamSection({ cc }: { cc: CloudClient }) {
 
 function MemberTeamSection({ cc }: { cc: CloudClient }) {
   const [loading, setLoading] = useState(true);
+  const [memberships, setMemberships] = useState<(TeamMember & { team: Team })[]>([]);
   const [membership, setMembership] = useState<(TeamMember & { team: Team }) | null>(null);
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [invites, setInvites] = useState<(TeamMember & { team: Team })[]>([]);
@@ -1198,6 +1322,8 @@ function MemberTeamSection({ cc }: { cc: CloudClient }) {
 
   const refresh = async () => {
     setLoading(true);
+    const all = await listMyMemberships();
+    setMemberships(all);
     const active = await getMyMembership();
     setMembership(active);
     if (active) {
@@ -1206,6 +1332,11 @@ function MemberTeamSection({ cc }: { cc: CloudClient }) {
       setInvites(await getPendingInvitesForMe());
     }
     setLoading(false);
+  };
+
+  const handleSwitchTeam = async (teamId: string) => {
+    await setActiveTeamId(teamId);
+    await refresh();
   };
 
   useEffect(() => { refresh(); }, []);
@@ -1248,15 +1379,29 @@ function MemberTeamSection({ cc }: { cc: CloudClient }) {
   if (membership) {
     const freshMe = members.find(m => m.id === membership.id) || membership;
     return (
-      <TeamWorkspace
-        team={membership.team}
-        members={members}
-        isOwner={false}
-        myMember={freshMe}
-        canManage={membership.role === 'leader'}
-        onChanged={refresh}
-        cc={cc}
-      />
+      <div className="space-y-3">
+        {memberships.length > 1 && (
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold text-ink-muted">Team:</span>
+            <select
+              value={membership.team_id}
+              onChange={e => handleSwitchTeam(e.target.value)}
+              className="bg-ink/5 border border-hairline rounded-lg px-2.5 py-1.5 text-xs font-semibold text-ink outline-none focus:border-accent"
+            >
+              {memberships.map(m => <option key={m.team_id} value={m.team_id}>{m.team.name}</option>)}
+            </select>
+          </div>
+        )}
+        <TeamWorkspace
+          team={membership.team}
+          members={members}
+          isOwner={false}
+          myMember={freshMe}
+          canManage={membership.role === 'leader'}
+          onChanged={refresh}
+          cc={cc}
+        />
+      </div>
     );
   }
 
@@ -1538,7 +1683,7 @@ function TeamDirectory() {
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
             {sortedTeams.map(t => (
-              <GlassCard key={t.id} className="overflow-hidden flex flex-col w-full">
+              <GlassCard key={t.id} className="stagger-item overflow-hidden flex flex-col w-full">
                 {t.join_ad_url && (
                   <div className="w-full overflow-hidden border-b border-hairline bg-ink/[0.04] flex items-center justify-center">
                     <img src={t.join_ad_url} alt="" className="w-full max-h-56 object-contain" />
@@ -1585,11 +1730,16 @@ function TeamDirectory() {
 
 function RequestJoinModal({ target, onClose }: { target: { id: string; name: string }; onClose: () => void }) {
   const [message, setMessage] = useState('');
+  const [jobTypes, setJobTypes] = useState<JobTitle[]>([]);
   const [sending, setSending] = useState(false);
+
+  const toggleJob = (job: JobTitle) => {
+    setJobTypes(prev => prev.includes(job) ? prev.filter(j => j !== job) : [...prev, job]);
+  };
 
   const handleSend = async () => {
     setSending(true);
-    const error = await requestToJoinTeam(target.id, message.trim());
+    const error = await requestToJoinTeam(target.id, message.trim(), jobTypes);
     setSending(false);
     if (error) { swal({ icon: 'error', title: 'Could not send request', text: error }); return; }
     swalToast({ icon: 'success', title: 'Join request sent' });
@@ -1600,9 +1750,29 @@ function RequestJoinModal({ target, onClose }: { target: { id: string; name: str
     <Modal open onClose={onClose} title={`Request to join ${target.name}`} size="sm" footer={
       <Button className="w-full" onClick={handleSend} disabled={sending}>{sending ? 'Sending...' : 'Send Request'}</Button>
     }>
-      <div className="space-y-1">
-        <label className="text-xs text-accent font-semibold">Message (optional letter to the admin)</label>
-        <Textarea placeholder="Tell them a bit about yourself..." value={message} onChange={e => setMessage(e.target.value)} rows={4} />
+      <div className="space-y-3">
+        <div className="space-y-1.5">
+          <label className="text-xs text-accent font-semibold">Which job(s) are you applying for?</label>
+          <div className="flex flex-wrap gap-1.5">
+            {JOB_TITLES.map(job => (
+              <button
+                key={job}
+                type="button"
+                onClick={() => toggleJob(job)}
+                className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                  jobTypes.includes(job) ? 'bg-accent text-white border-accent' : 'bg-ink/5 border-hairline text-ink-muted hover:bg-ink/10'
+                }`}
+              >
+                {job}
+              </button>
+            ))}
+          </div>
+          <p className="text-[10px] text-ink-faint">If accepted, you'll be given priority for whichever job(s) you pick here.</p>
+        </div>
+        <div className="space-y-1">
+          <label className="text-xs text-accent font-semibold">Message (optional letter to the admin)</label>
+          <Textarea placeholder="Tell them a bit about yourself..." value={message} onChange={e => setMessage(e.target.value)} rows={4} />
+        </div>
       </div>
     </Modal>
   );
@@ -1751,6 +1921,25 @@ function RateSubmissionControl({ task, onChanged }: { task: Task; onChanged: () 
     onChanged();
   };
 
+  const handleMarkUnsuccessful = async () => {
+    const result = await swal({
+      icon: 'warning',
+      title: 'Mark this task unsuccessful?',
+      text: 'This is final — the task is closed out as unsuccessful rather than sent back for revision.',
+      input: 'text',
+      inputLabel: 'Reason (optional)',
+      showCancelButton: true,
+      confirmButtonText: 'Mark Unsuccessful',
+    });
+    if (!result.isConfirmed) return;
+    setBusy(true);
+    const error = await markTaskUnsuccessful(task.id, result.value || undefined);
+    setBusy(false);
+    if (error) { swal({ icon: 'error', title: 'Could not update task', text: error }); return; }
+    swalToast({ icon: 'success', title: 'Task marked unsuccessful' });
+    onChanged();
+  };
+
   if (rejecting) {
     return (
       <div className="flex gap-1.5 mt-1">
@@ -1766,7 +1955,8 @@ function RateSubmissionControl({ task, onChanged }: { task: Task; onChanged: () 
         {[1, 2, 3, 4, 5].map(n => <option key={n} value={n}>{n} star{n > 1 ? 's' : ''}</option>)}
       </select>
       <Button size="sm" onClick={handleApprove} disabled={busy}><ThumbsUp size={11} /></Button>
-      <Button size="sm" variant="secondary" onClick={() => setRejecting(true)} disabled={busy}><ThumbsDown size={11} /></Button>
+      <Button size="sm" variant="secondary" onClick={() => setRejecting(true)} disabled={busy} title="Send back for revision"><ThumbsDown size={11} /></Button>
+      <Button size="sm" variant="danger" onClick={handleMarkUnsuccessful} disabled={busy} title="Mark unsuccessful (final)">✕</Button>
     </div>
   );
 }
@@ -2112,7 +2302,11 @@ function TasksSection({ team, members, canManageTasks, canReviewTasks, canPrevie
                     {t.due_date && (
                       <span className="text-[10px] text-ink-faint flex items-center gap-1"><CalendarClock size={11} /> {formatDue(t.due_date)}</span>
                     )}
-                    <span className="text-[10px] font-semibold text-ink-faint">{STATUS_LABEL[t.status]}</span>
+                    <span className="text-[10px] font-semibold text-ink-faint">
+                      {t.status === 'todo' ? 'Pending' : STATUS_LABEL[t.status]}
+                      {t.status === 'todo' && t.offer_expires_at && <span className="text-ink-faint font-normal"> · offer expires {formatDue(t.offer_expires_at)}</span>}
+                      {t.status === 'cancelled' && t.last_outcome === 'unsuccessful' && <span className="text-danger font-normal"> · unsuccessful</span>}
+                    </span>
                     {t.status !== 'todo' && <TaskAttachmentControl task={t} team={team} cc={cc} onChanged={refresh} />}
                     {t.status === 'todo' && t.attachment_msg_id && (
                       <button onClick={() => cc.downloadTaskAttachment(team.telegram_channel_id, t.attachment_msg_id!, t.attachment_name || 'attachment')} className="text-[11px] text-accent hover:text-ink flex items-center gap-1 font-semibold">
@@ -2788,7 +2982,7 @@ function AnalyticsSection({ team, members }: { team: Team; members: TeamMember[]
         {top.map((m, i) => (
           <div key={m.id} className="flex items-center justify-between p-2.5 rounded-xl border border-hairline">
             <span className="text-sm font-semibold text-ink">#{i + 1} {m.profile?.name || m.invited_email}</span>
-            <span className="text-sm font-bold text-accent">${m.balance.toFixed(2)}</span>
+            <span className="text-sm font-bold text-accent">{m.privacy_prefs?.hide_balance ? '••••' : `$${m.balance.toFixed(2)}`}</span>
           </div>
         ))}
       </GlassCard>
@@ -2810,7 +3004,7 @@ function AnalyticsSection({ team, members }: { team: Team; members: TeamMember[]
         {members.map(m => (
           <div key={m.id} className="flex items-center justify-between p-2 text-xs border-b border-hairline last:border-0">
             <span className="text-ink">{m.profile?.name || m.invited_email} <span className="text-ink-faint">({m.job_title || 'no job'})</span></span>
-            <span className="font-semibold text-ink">${m.balance.toFixed(2)}</span>
+            <span className="font-semibold text-ink">{m.privacy_prefs?.hide_balance ? '••••' : `$${m.balance.toFixed(2)}`}</span>
           </div>
         ))}
       </GlassCard>
@@ -2850,6 +3044,15 @@ async function ensurePrivateFolderId(cc: CloudClient, team: Team, userId: string
   await cc.createChannelFolder(team.telegram_channel_id, name, null, [userId]);
   const { folders: refreshed } = await cc.fetchChannelFiles(team.telegram_channel_id);
   return refreshed.find(f => f.parentId === null && f.name === name)?.id ?? null;
+}
+
+/** The Team Files browser only ever shows ZIP backups — checked against the underlying
+ *  Telegram file's own name (not the possibly-custom display name/meta.name, which might
+ *  omit the extension entirely), matching how downloadCloudFile derives a file's real
+ *  extension elsewhere in this file. */
+function isZipFile(f: CloudFile): boolean {
+  const rawName = (f.msg as any)?.file?.name as string | undefined;
+  return (rawName || f.name || '').toLowerCase().endsWith('.zip');
 }
 
 function TeamFilesSection({ team, canManage, canManageCloudFiles, cc, members }: { team: Team; canManage: boolean; canManageCloudFiles: boolean; cc: CloudClient; members: TeamMember[] }) {
@@ -3043,12 +3246,16 @@ function TeamFilesSection({ team, canManage, canManageCloudFiles, cc, members }:
   // task-submission/reference files land in the same Telegram channel but
   // aren't deliberate Team Cloud uploads, so they're excluded by the flags
   // set at their own upload call sites (see upsertCloudFileMeta callers).
+  // This browser is specifically for ZIP backups (matching the personal TeleCloud's own
+  // workspace-backup listing, which is ZIP-only by construction) — a reference photo or
+  // other non-ZIP file uploaded into the same channel/folder isn't a deliverable and
+  // shouldn't clutter this card grid.
   const filesInFolder = files.filter(f => {
     if (f.folderId !== currentFolderId) return false;
     if (!canSeeFile(f)) return false;
     const meta = metaByMsgId.get(f.id);
     if (meta?.is_chat_upload || meta?.is_task_submission) return false;
-    return true;
+    return isZipFile(f);
   });
   const inFinished = currentFolder?.name === 'Finished';
 
@@ -3088,9 +3295,9 @@ function TeamFilesSection({ team, canManage, canManageCloudFiles, cc, members }:
         <p className="text-[11px] text-ink-faint">You're not a member of this folder — ask an admin to add you before uploading here.</p>
       )}
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
         {filesInFolder.length === 0 && (
-          <p className="text-xs text-ink-faint text-center py-6 sm:col-span-2 lg:col-span-3">No files in this folder yet.</p>
+          <p className="text-xs text-ink-faint text-center py-6 sm:col-span-2 lg:col-span-3">No ZIP backups in this folder yet.</p>
         )}
         {filesInFolder.map(f => {
           const meta = metaByMsgId.get(f.id);
@@ -3098,31 +3305,32 @@ function TeamFilesSection({ team, canManage, canManageCloudFiles, cc, members }:
           const fileComments = comments.filter(c => c.fileId === f.id);
           const displayName = meta?.display_name || f.name;
           return (
-            <GlassCard key={f.id} className="overflow-hidden flex flex-col">
-              {meta?.cover_image_path ? (
-                <div className="w-full aspect-[16/9] bg-ink/5 flex items-center justify-center overflow-hidden">
-                  <img src={`${meta.cover_image_path}?v=${meta.cover_version}`} alt="" className="w-full h-full object-contain" />
-                </div>
-              ) : null}
-              <div className="p-3 space-y-2 flex-1">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="min-w-0">
-                    <p className="text-xs font-semibold text-ink truncate">{displayName}</p>
-                    <p className="text-[10px] text-ink-faint">
-                      {cc.formatSize(f.sizeBytes)} · {inFinished ? <span className="font-semibold text-accent">{uploaderName(f)}</span> : uploaderName(f)}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-1 shrink-0">
-                    {(canManage || canManageCloudFiles) && (
-                      <button onClick={() => handleCoverPick(f)} disabled={coverBusyId === f.id} aria-label={`Set cover for ${displayName}`} className="p-1.5 rounded-lg text-ink-faint hover:text-accent hover:bg-accent-soft transition-colors">
-                        <ImagePlus size={14} />
-                      </button>
-                    )}
-                    <button onClick={() => handleDownload(f)} aria-label={`Download ${displayName}`} className="p-1.5 rounded-lg text-ink-faint hover:text-accent hover:bg-accent-soft transition-colors">
-                      <Download size={14} />
+            <GlassCard key={f.id} radius="xl" className="overflow-hidden flex flex-col hover:border-accent/50 transition-colors group">
+              <div className="h-40 w-full bg-accent-soft flex flex-col items-center justify-center border-b border-hairline relative overflow-hidden">
+                {meta?.cover_image_path ? (
+                  <>
+                    <img src={`${meta.cover_image_path}?v=${meta.cover_version}`} alt="" className="w-full h-full object-cover opacity-90 group-hover:opacity-100 transition-opacity" />
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent" />
+                  </>
+                ) : (
+                  <Boxes size={32} className="text-accent/50" />
+                )}
+                <span className="absolute top-2 left-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wide bg-black/50 text-white backdrop-blur-sm">
+                  <Boxes size={10} /> ZIP
+                </span>
+                <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  {(canManage || canManageCloudFiles) && (
+                    <button onClick={() => handleCoverPick(f)} disabled={coverBusyId === f.id} aria-label={`Set cover for ${displayName}`} className="p-1.5 rounded-lg bg-black/40 text-white">
+                      <ImagePlus size={12} />
                     </button>
-                  </div>
+                  )}
                 </div>
+              </div>
+              <div className="p-4 flex flex-col gap-2 flex-1">
+                <h4 className="font-bold text-ink text-base truncate">{displayName}</h4>
+                <p className="text-xs text-ink-muted bg-ink/5 px-2 py-1.5 rounded-lg border border-hairline truncate">
+                  {cc.formatSize(f.sizeBytes)} · {inFinished ? <span className="font-semibold text-accent">{uploaderName(f)}</span> : uploaderName(f)}
+                </p>
 
                 {(canManage || canManageCloudFiles) && (
                   <div className="flex items-center gap-1.5">
@@ -3141,6 +3349,13 @@ function TeamFilesSection({ team, canManage, canManageCloudFiles, cc, members }:
                 {!(canManage || canManageCloudFiles) && visibility === 'private' && (
                   <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-ink/5 text-ink-faint inline-flex items-center gap-1"><Lock size={9} /> Private</span>
                 )}
+
+                <div className="flex justify-between items-center text-xs text-ink-muted font-mono border-t border-hairline pt-2">
+                  <span>{new Date(f.date).toLocaleDateString()}</span>
+                  <button onClick={() => handleDownload(f)} className="text-accent hover:text-ink flex items-center gap-1 font-sans font-bold bg-accent-soft hover:opacity-80 px-2 py-1 rounded transition-colors">
+                    <Download size={14} /> Download
+                  </button>
+                </div>
 
                 <div className="pt-2 border-t border-hairline space-y-1.5">
                   <p className="text-[9px] font-semibold text-accent uppercase tracking-wide">Comments</p>
@@ -3245,6 +3460,102 @@ function ChatSection({ team, members, myMember, isOwner, canManage, onChanged, c
   );
 }
 
+function useSenderColor(avatar: string | undefined): string {
+  const [color, setColor] = useState('inherit');
+  useEffect(() => {
+    let cancelled = false;
+    if (!avatar) { setColor('inherit'); return; }
+    dominantColorFromImage(avatar, 'inherit').then(c => { if (!cancelled) setColor(c); });
+    return () => { cancelled = true; };
+  }, [avatar]);
+  return color;
+}
+
+function formatMessageTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+}
+
+const MIME_BY_EXTENSION: Record<string, string> = {
+  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml',
+  ogg: 'audio/ogg', mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4', opus: 'audio/opus', aac: 'audio/aac', webm: 'audio/webm',
+};
+const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'];
+const AUDIO_EXTENSIONS = ['webm', 'ogg', 'mp3', 'wav', 'm4a', 'opus', 'aac'];
+
+function getAttachmentKind(name: string): 'image' | 'audio' | 'file' {
+  const ext = name.split('.').pop()?.toLowerCase() ?? '';
+  if (IMAGE_EXTENSIONS.includes(ext)) return 'image';
+  if (AUDIO_EXTENSIONS.includes(ext)) return 'audio';
+  return 'file';
+}
+
+function guessMimeType(name: string): string | undefined {
+  const ext = name.split('.').pop()?.toLowerCase() ?? '';
+  return MIME_BY_EXTENSION[ext];
+}
+
+// Session-only cache (blob URLs can't survive a reload anyway) so a bubble that re-renders
+// — or a second bubble instance somehow pointing at the same message — never re-downloads
+// media it already fetched once.
+const attachmentPreviewCache = new Map<number, string>();
+
+/** A photo or voice-message attachment auto-downloads and renders inline the moment the
+ *  bubble mounts — no manual "click to download" step, unlike a generic file attachment,
+ *  which keeps the existing Paperclip download link/button. */
+function AttachmentPreview({ channelId, msgId, name, onFetchPreview, onDownload }: {
+  channelId: string;
+  msgId: number;
+  name: string;
+  onFetchPreview: (channelId: string, msgId: number, mimeType?: string) => Promise<string | null>;
+  onDownload: () => void;
+}) {
+  const kind = getAttachmentKind(name);
+  const [url, setUrl] = useState<string | null>(attachmentPreviewCache.get(msgId) ?? null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    if (kind === 'file' || url) return;
+    let cancelled = false;
+    onFetchPreview(channelId, msgId, guessMimeType(name)).then(fetched => {
+      if (cancelled) return;
+      if (fetched) {
+        attachmentPreviewCache.set(msgId, fetched);
+        setUrl(fetched);
+      } else {
+        setFailed(true);
+      }
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kind, channelId, msgId]);
+
+  if (kind === 'file') {
+    return (
+      <button onClick={onDownload} className="text-[11px] text-accent hover:text-ink flex items-center gap-1 font-semibold mt-1">
+        <Paperclip size={11} /> {name || 'Attachment'}
+      </button>
+    );
+  }
+
+  if (failed) {
+    return (
+      <button onClick={onDownload} className="text-[11px] text-danger hover:text-ink flex items-center gap-1 font-semibold mt-1">
+        <Paperclip size={11} /> Preview failed — {name || 'Attachment'}
+      </button>
+    );
+  }
+
+  if (!url) {
+    return <div className="mt-1 w-40 h-28 rounded-lg animate-skeleton" />;
+  }
+
+  if (kind === 'image') {
+    return <img src={url} alt={name} className="mt-1 max-w-[240px] max-h-[240px] rounded-lg object-cover cursor-pointer" onClick={() => window.open(url, '_blank')} />;
+  }
+
+  return <audio controls src={url} className="mt-1 h-9 max-w-[240px]" />;
+}
+
 function ChatAvatar({ name, avatar, size = 28 }: { name: string; avatar?: string; size?: number }) {
   return (
     <div
@@ -3258,6 +3569,7 @@ function ChatAvatar({ name, avatar, size = 28 }: { name: string; avatar?: string
 
 function hydrateSender(msg: TeamMessage, members: TeamMember[]): TeamMessage {
   if (msg.sender?.name) return msg;
+  if (msg.sender_id === null) return { ...msg, sender: { name: 'Team Bot', avatar: '' } };
   const m = members.find(mm => mm.user_id === msg.sender_id);
   return { ...msg, sender: { name: m?.profile?.name || m?.invited_email || 'Member', avatar: m?.profile?.avatar || '' } };
 }
@@ -3273,14 +3585,17 @@ function upsertById<T extends { id: string }>(list: T[], item: T): T[] {
 const QUICK_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🎉'];
 const EMPTY_REACTIONS: MessageReaction[] = [];
 
+// Adding a *new* reaction now happens from the bubble's long-press/right-click menu (a quick-emoji
+// row up top, see ChatBubbleMenu.tsx) rather than a "+" button here — this bar is just the
+// already-placed reaction chips, still clickable to toggle your own.
 function ReactionBar({ reactions, myUserId, onToggle }: { reactions: MessageReaction[]; myUserId: string | undefined; onToggle: (emoji: string) => void }) {
-  const [pickerOpen, setPickerOpen] = useState(false);
   const grouped = new Map<string, MessageReaction[]>();
   for (const r of reactions) {
     const list = grouped.get(r.emoji) ?? [];
     list.push(r);
     grouped.set(r.emoji, list);
   }
+  if (grouped.size === 0) return null;
   return (
     <div className="flex items-center gap-1 flex-wrap mt-1">
       {Array.from(grouped.entries()).map(([emoji, list]) => (
@@ -3295,16 +3610,6 @@ function ReactionBar({ reactions, myUserId, onToggle }: { reactions: MessageReac
           {emoji} {list.length}
         </button>
       ))}
-      <div className="relative">
-        <button type="button" onClick={() => setPickerOpen(o => !o)} className="text-[11px] px-1.5 py-0.5 rounded-full border border-hairline text-ink-faint hover:border-accent/40">+</button>
-        {pickerOpen && (
-          <div className="absolute z-10 top-full left-0 mt-1 flex gap-1 p-1.5 rounded-xl bg-surface border border-hairline shadow-lg">
-            {QUICK_EMOJIS.map(e => (
-              <button key={e} type="button" onClick={() => { onToggle(e); setPickerOpen(false); }} className="text-sm hover:scale-125 transition-transform">{e}</button>
-            ))}
-          </div>
-        )}
-      </div>
     </div>
   );
 }
@@ -3319,11 +3624,12 @@ function reactionsSignatureEqual(a: MessageReaction[], b: MessageReaction[]): bo
   return true;
 }
 
-const TeamMessageBubble = memo(function TeamMessageBubble({ message, replied, isMine, canManage, reactions, myUserId, teamId, telegramChannelId, onOpenProfile, onReply, onEdit, onDelete, onPin, onDownloadAttachment, onToggleReaction }: {
+const TeamMessageBubble = memo(function TeamMessageBubble({ message, replied, isMine, canManage, isVerified, reactions, myUserId, teamId, telegramChannelId, onOpenProfile, onReply, onEdit, onDelete, onPin, onReport, onDownloadAttachment, onFetchAttachmentPreview, onToggleReaction }: {
   message: TeamMessage;
   replied: TeamMessage | null;
   isMine: boolean;
   canManage: boolean;
+  isVerified?: boolean;
   reactions: MessageReaction[];
   myUserId: string | undefined;
   teamId: string;
@@ -3333,27 +3639,46 @@ const TeamMessageBubble = memo(function TeamMessageBubble({ message, replied, is
   onEdit: (m: TeamMessage) => void;
   onDelete: (id: string) => void;
   onPin: (id: string, pinned: boolean) => void;
+  onReport: (m: TeamMessage) => void;
   onDownloadAttachment: (channelId: string, msgId: number, name: string) => void;
+  onFetchAttachmentPreview: (channelId: string, msgId: number, mimeType?: string) => Promise<string | null>;
   onToggleReaction: (teamId: string, table: 'team_messages', messageId: string, emoji: string) => void;
 }) {
   const m = message;
+  const isBot = m.sender_id === null;
+  const nameColor = useSenderColor(m.sender?.avatar);
+  const { bind, menuElement } = useChatBubbleMenu();
+  const bubbleActions = () => [
+    { key: 'copy', label: 'Copy', icon: <ChatBubbleIcons.Copy size={13} />, onSelect: () => navigator.clipboard.writeText(m.body) },
+    !m.deleted && { key: 'reply', label: 'Reply', icon: <ChatBubbleIcons.Reply size={13} />, onSelect: () => onReply(m) },
+    !m.deleted && isMine && { key: 'edit', label: 'Edit', icon: <ChatBubbleIcons.Edit size={13} />, onSelect: () => onEdit(m) },
+    !m.deleted && !isMine && { key: 'report', label: 'Report to Admin', icon: <ChatBubbleIcons.Report size={13} />, onSelect: () => onReport(m) },
+    !m.deleted && canManage && { key: 'pin', label: m.pinned ? 'Unpin' : 'Pin', icon: m.pinned ? <ChatBubbleIcons.PinOff size={13} /> : <ChatBubbleIcons.Pin size={13} />, onSelect: () => onPin(m.id, !m.pinned) },
+    !m.deleted && (isMine || canManage) && { key: 'delete', label: 'Delete', icon: <ChatBubbleIcons.Delete size={13} />, danger: true, onSelect: () => onDelete(m.id) },
+  ].filter(Boolean) as { key: string; label: string; icon: React.ReactNode; danger?: boolean; onSelect: () => void }[];
+  const bubbleReactions = () => m.deleted ? [] : QUICK_EMOJIS.map(emoji => ({
+    emoji,
+    active: reactions.some(r => r.emoji === emoji && r.user_id === myUserId),
+    onSelect: () => onToggleReaction(teamId, 'team_messages', m.id, emoji),
+  }));
+
   return (
-    <div className={`flex items-start gap-2 max-w-md group ${isMine ? 'ml-auto flex-row-reverse' : ''}`}>
-      <button type="button" onClick={() => onOpenProfile(m.sender_id)} className="shrink-0">
+    <div className={`flex items-start gap-2 max-w-md group animate-fade-in-up ${isMine ? 'ml-auto flex-row-reverse' : ''}`}>
+      <button type="button" onClick={() => m.sender_id && onOpenProfile(m.sender_id)} className="shrink-0" disabled={isBot}>
         <ChatAvatar name={m.sender?.name || 'Member'} avatar={m.sender?.avatar} />
       </button>
       <div className="min-w-0 flex-1">
-        <div className={`p-2.5 rounded-2xl min-w-0 backdrop-blur-sm shadow-sm transition-all duration-200 ${isMine ? 'bg-gradient-to-br from-accent-soft to-accent-soft/60 rounded-tr-sm' : 'bg-gradient-to-br from-ink/[0.04] to-ink/[0.02] rounded-tl-sm'}`}>
+        <div
+          {...bind(bubbleActions, bubbleReactions)}
+          className={`p-2.5 rounded-2xl min-w-0 backdrop-blur-sm shadow-sm transition-all duration-200 select-none ${isMine ? 'bg-gradient-to-br from-accent-soft to-accent-soft/60 rounded-tr-sm' : 'bg-gradient-to-br from-ink/[0.04] to-ink/[0.02] rounded-tl-sm'}`}
+        >
           <div className={`flex items-center gap-2 ${isMine ? 'flex-row-reverse' : ''}`}>
-            <button type="button" onClick={() => onOpenProfile(m.sender_id)} className="text-[10px] font-semibold text-accent hover:underline">{m.sender?.name || 'Member'}</button>
+            <button type="button" onClick={() => m.sender_id && onOpenProfile(m.sender_id)} disabled={isBot} className="text-[10px] font-semibold hover:underline flex items-center gap-1 disabled:cursor-default" style={{ color: isBot ? undefined : nameColor }}>
+              {m.sender?.name || 'Member'} {isVerified && <ShieldCheck size={10} className="text-accent" />}
+            </button>
             {m.pinned && <span className="text-[9px] text-ink-faint">📌</span>}
             {m.edited_at && !m.deleted && <span className="text-[9px] text-ink-faint">(edited)</span>}
-            <span className={`text-[9px] text-ink-faint opacity-0 group-hover:opacity-100 transition-opacity flex gap-1.5 ${isMine ? 'mr-auto' : 'ml-auto'}`}>
-              {!m.deleted && <button onClick={() => onReply(m)} className="hover:text-accent">Reply</button>}
-              {!m.deleted && isMine && <button onClick={() => onEdit(m)} className="hover:text-accent">Edit</button>}
-              {!m.deleted && isMine && <button onClick={() => onDelete(m.id)} className="hover:text-danger">Delete</button>}
-              {!m.deleted && canManage && <button onClick={() => onPin(m.id, !m.pinned)} className="hover:text-accent">{m.pinned ? 'Unpin' : 'Pin'}</button>}
-            </span>
+            <span className="text-[9px] text-ink-faint">{formatMessageTime(m.created_at)}</span>
           </div>
           {replied && (
             <div className="mt-1 mb-1 pl-2 border-l-2 border-accent/40 text-[10px] text-ink-faint truncate">
@@ -3364,36 +3689,40 @@ const TeamMessageBubble = memo(function TeamMessageBubble({ message, replied, is
             <p className="text-sm text-ink-faint italic">This message was deleted</p>
           ) : (
             <>
-              <p className="text-sm text-ink whitespace-pre-line">{m.body}</p>
+              <p className="text-sm text-ink">{renderMarkdownMessage(m.body)}</p>
               {m.attachment_msg_id && (
-                <button
-                  onClick={() => onDownloadAttachment(telegramChannelId, m.attachment_msg_id!, m.attachment_name || 'attachment')}
-                  className="text-[11px] text-accent hover:text-ink flex items-center gap-1 font-semibold mt-1"
-                >
-                  <Paperclip size={11} /> {m.attachment_name || 'Attachment'}
-                </button>
+                <AttachmentPreview
+                  channelId={telegramChannelId}
+                  msgId={m.attachment_msg_id}
+                  name={m.attachment_name || 'attachment'}
+                  onFetchPreview={onFetchAttachmentPreview}
+                  onDownload={() => onDownloadAttachment(telegramChannelId, m.attachment_msg_id!, m.attachment_name || 'attachment')}
+                />
               )}
             </>
           )}
         </div>
         {!m.deleted && <ReactionBar reactions={reactions} myUserId={myUserId} onToggle={emoji => onToggleReaction(teamId, 'team_messages', m.id, emoji)} />}
       </div>
+      {menuElement}
     </div>
   );
 }, (prev, next) => (
   prev.message === next.message &&
   prev.replied === next.replied &&
+  prev.isVerified === next.isVerified &&
   prev.isMine === next.isMine &&
   prev.canManage === next.canManage &&
   prev.myUserId === next.myUserId &&
   reactionsSignatureEqual(prev.reactions, next.reactions)
 ));
 
-const DirectMessageBubble = memo(function DirectMessageBubble({ message, replied, isMine, partnerId, reactions, myUserId, teamId, telegramChannelId, partnerName, partnerAvatar, onDownloadAttachment, onReply, onEdit, onDelete, onToggleReaction }: {
+const DirectMessageBubble = memo(function DirectMessageBubble({ message, replied, isMine, partnerId, isPartnerOnline, reactions, myUserId, teamId, telegramChannelId, partnerName, partnerAvatar, onDownloadAttachment, onFetchAttachmentPreview, onReply, onEdit, onDelete, onReport, onToggleReaction }: {
   message: DirectMessage;
   replied: DirectMessage | null;
   isMine: boolean;
   partnerId: string;
+  isPartnerOnline?: boolean;
   reactions: MessageReaction[];
   myUserId: string | undefined;
   teamId: string;
@@ -3401,27 +3730,43 @@ const DirectMessageBubble = memo(function DirectMessageBubble({ message, replied
   partnerName: string;
   partnerAvatar?: string;
   onDownloadAttachment: (channelId: string, msgId: number, name: string) => void;
+  onFetchAttachmentPreview: (channelId: string, msgId: number, mimeType?: string) => Promise<string | null>;
   onReply: (m: DirectMessage) => void;
   onEdit: (m: DirectMessage) => void;
   onDelete: (id: string) => void;
+  onReport: (m: DirectMessage) => void;
   onToggleReaction: (teamId: string, table: 'direct_messages', messageId: string, emoji: string) => void;
 }) {
   const m = message;
+  const { bind, menuElement } = useChatBubbleMenu();
+  const bubbleActions = () => [
+    { key: 'copy', label: 'Copy', icon: <ChatBubbleIcons.Copy size={13} />, onSelect: () => navigator.clipboard.writeText(m.body) },
+    !m.deleted && { key: 'reply', label: 'Reply', icon: <ChatBubbleIcons.Reply size={13} />, onSelect: () => onReply(m) },
+    !m.deleted && isMine && { key: 'edit', label: 'Edit', icon: <ChatBubbleIcons.Edit size={13} />, onSelect: () => onEdit(m) },
+    !m.deleted && !isMine && { key: 'report', label: 'Report to Admin', icon: <ChatBubbleIcons.Report size={13} />, onSelect: () => onReport(m) },
+    !m.deleted && isMine && { key: 'delete', label: 'Delete', icon: <ChatBubbleIcons.Delete size={13} />, danger: true, onSelect: () => onDelete(m.id) },
+  ].filter(Boolean) as { key: string; label: string; icon: React.ReactNode; danger?: boolean; onSelect: () => void }[];
+  const bubbleReactions = () => m.deleted ? [] : QUICK_EMOJIS.map(emoji => ({
+    emoji,
+    active: reactions.some(r => r.emoji === emoji && r.user_id === myUserId),
+    onSelect: () => onToggleReaction(teamId, 'direct_messages', m.id, emoji),
+  }));
+
   return (
     <div className={`flex items-end gap-2 max-w-md group ${isMine ? 'ml-auto flex-row-reverse' : ''}`}>
-      <ChatAvatar name={partnerName} avatar={m.sender_id === partnerId ? partnerAvatar : undefined} size={22} />
+      <div className="relative shrink-0">
+        <ChatAvatar name={partnerName} avatar={m.sender_id === partnerId ? partnerAvatar : undefined} size={22} />
+        {m.sender_id === partnerId && isPartnerOnline && (
+          <span className="absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full bg-success border border-surface" />
+        )}
+      </div>
       <div className="min-w-0">
-        <div className={`p-2.5 rounded-2xl min-w-0 backdrop-blur-sm shadow-sm transition-all duration-200 ${!isMine ? 'bg-gradient-to-br from-ink/[0.04] to-ink/[0.02] rounded-bl-sm' : 'bg-gradient-to-br from-accent-soft to-accent-soft/60 rounded-br-sm'}`}>
-          {(m.edited_at || isMine) && !m.deleted && (
-            <div className="flex items-center gap-1.5 justify-end mb-0.5">
-              {m.edited_at && <span className="text-[9px] text-ink-faint">(edited)</span>}
-              <span className="text-[9px] text-ink-faint opacity-0 group-hover:opacity-100 transition-opacity flex gap-1.5">
-                <button onClick={() => onReply(m)} className="hover:text-accent">Reply</button>
-                {isMine && <button onClick={() => onEdit(m)} className="hover:text-accent">Edit</button>}
-                {isMine && <button onClick={() => onDelete(m.id)} className="hover:text-danger">Delete</button>}
-              </span>
-            </div>
-          )}
+        <div {...bind(bubbleActions, bubbleReactions)} className={`p-2.5 rounded-2xl min-w-0 backdrop-blur-sm shadow-sm transition-all duration-200 select-none animate-fade-in-up ${!isMine ? 'bg-gradient-to-br from-ink/[0.04] to-ink/[0.02] rounded-bl-sm' : 'bg-gradient-to-br from-accent-soft to-accent-soft/60 rounded-br-sm'}`}>
+          <div className="flex items-center gap-1.5 justify-end mb-0.5">
+            {m.edited_at && !m.deleted && <span className="text-[9px] text-ink-faint">(edited)</span>}
+            <span className="text-[9px] text-ink-faint">{formatMessageTime(m.created_at)}</span>
+            {isMine && !m.deleted && <span className={`text-[9px] ${m.read ? 'text-accent' : 'text-ink-faint'}`}>{m.read ? '✓✓' : '✓'}</span>}
+          </div>
           {replied && (
             <div className="mb-1 pl-2 border-l-2 border-accent/40 text-[10px] text-ink-faint truncate">
               {replied.deleted ? 'Message deleted' : replied.body}
@@ -3431,20 +3776,22 @@ const DirectMessageBubble = memo(function DirectMessageBubble({ message, replied
             <p className="text-sm text-ink-faint italic">This message was deleted</p>
           ) : (
             <>
-              <p className="text-sm text-ink whitespace-pre-line">{m.body}</p>
+              <p className="text-sm text-ink">{renderMarkdownMessage(m.body)}</p>
               {m.attachment_msg_id && (
-                <button
-                  onClick={() => onDownloadAttachment(telegramChannelId, m.attachment_msg_id!, m.attachment_name || 'attachment')}
-                  className="text-[11px] text-accent hover:text-ink flex items-center gap-1 font-semibold mt-1"
-                >
-                  <Paperclip size={11} /> {m.attachment_name || 'Attachment'}
-                </button>
+                <AttachmentPreview
+                  channelId={telegramChannelId}
+                  msgId={m.attachment_msg_id}
+                  name={m.attachment_name || 'attachment'}
+                  onFetchPreview={onFetchAttachmentPreview}
+                  onDownload={() => onDownloadAttachment(telegramChannelId, m.attachment_msg_id!, m.attachment_name || 'attachment')}
+                />
               )}
             </>
           )}
         </div>
         {!m.deleted && <ReactionBar reactions={reactions} myUserId={myUserId} onToggle={emoji => onToggleReaction(teamId, 'direct_messages', m.id, emoji)} />}
       </div>
+      {menuElement}
     </div>
   );
 }, (prev, next) => (
@@ -3453,6 +3800,7 @@ const DirectMessageBubble = memo(function DirectMessageBubble({ message, replied
   prev.isMine === next.isMine &&
   prev.myUserId === next.myUserId &&
   prev.partnerAvatar === next.partnerAvatar &&
+  prev.isPartnerOnline === next.isPartnerOnline &&
   reactionsSignatureEqual(prev.reactions, next.reactions)
 ));
 
@@ -3472,6 +3820,7 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
   const typingRef = useRef<ReturnType<typeof subscribeToTyping> | null>(null);
   const typingTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const photoInputRef = useRef<HTMLInputElement>(null);
 
   const { session } = useTeamAuth();
   const myUserId = session?.user.id;
@@ -3502,6 +3851,47 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
     if (messages.length > 0 && myUserId) markTeamChatRead(team.id, messages[messages.length - 1].id);
   }, [messages.length, team.id, myUserId]);
 
+  const [activeUserIds, setActiveUserIds] = useState<string[]>([]);
+  useEffect(() => {
+    if (!myUserId) return;
+    return subscribeToTeamPresence(team.id, myUserId, setActiveUserIds);
+  }, [team.id, myUserId]);
+
+  const handleReportMessage = async (m: TeamMessage) => {
+    const { value: reason } = await swal({
+      title: 'Report message to admin',
+      input: 'textarea',
+      inputLabel: 'Why are you reporting this message?',
+      showCancelButton: true,
+      confirmButtonText: 'Report',
+    });
+    if (!reason) return;
+    const error = await reportMessage(team.id, 'team_messages', m.id, reason);
+    if (error) { swal({ icon: 'error', title: 'Could not report message', text: error }); return; }
+    swalToast({ icon: 'success', title: 'Reported to admins' });
+  };
+
+  // Applied on-device immediately (add/remove the chip right away) rather than waiting on the
+  // round trip — toggleReaction's own realtime subscription would eventually reconcile this
+  // anyway, but that has a real network round trip's worth of lag a reaction shouldn't have.
+  const handleToggleReaction = async (tId: string, table: 'team_messages', messageId: string, emoji: string) => {
+    if (!myUserId) return;
+    const existing = reactions.find(r => r.message_id === messageId && r.emoji === emoji && r.user_id === myUserId);
+    if (existing) {
+      setReactions(prev => prev.filter(r => r.id !== existing.id));
+    } else {
+      const optimistic: MessageReaction = { id: crypto.randomUUID(), message_id: messageId, message_table: table, team_id: tId, user_id: myUserId, emoji, created_at: new Date().toISOString() };
+      setReactions(prev => [...prev, optimistic]);
+    }
+    const error = await toggleReaction(tId, table, messageId, emoji);
+    if (error) {
+      swalToast({ icon: 'error', title: 'Could not react' });
+      // Roll back by re-fetching rather than hand-reconstructing the exact prior state —
+      // simpler and this only runs on the rare failure path.
+      listReactions(team.id, 'team_messages').then(setReactions);
+    }
+  };
+
   const pinned = messages.filter(m => m.pinned && !m.deleted).slice(0, 3);
   const messageById = new Map(messages.map(m => [m.id, m]));
   const reactionsByMessageId = new Map<string, MessageReaction[]>();
@@ -3523,7 +3913,7 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
     setMentionQuery(null);
   };
 
-  const handleAttach = async (file: File) => {
+  const handleAttach = async (file: File, captionOverride?: string) => {
     if (!team.telegram_channel_id || !cc.isConnected) {
       swal({ icon: 'info', title: 'Connect Telegram', text: 'Connect Telegram and set the team channel to send files in chat.' });
       return;
@@ -3537,7 +3927,7 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
     setAttaching(false);
     if (result) {
       const id = crypto.randomUUID();
-      const text = body.trim() || `📎 ${result.name}`;
+      const text = body.trim() || captionOverride || `📎 ${result.name}`;
       pinToBottom();
       setMessages(prev => upsertById(prev, {
         id, team_id: team.id, sender_id: myUserId || '', body: text,
@@ -3550,6 +3940,8 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
       setBody(''); setReplyTo(null);
     }
   };
+
+  const voiceRecorder = useVoiceRecorder((file) => handleAttach(file, '🎤 Voice message'));
 
   const handleSend = async () => {
     if (!body.trim()) return;
@@ -3584,7 +3976,9 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
     }
     const others = members.filter(m => m.status === 'active' && m.user_id && m.user_id !== myUserId && !mentioned.includes(m.user_id!));
     for (const m of others) {
-      if (m.notification_prefs?.chat !== false) notify(m.user_id!, `New message in ${team.name}`, text.slice(0, 80));
+      // Default mode is "all" (every message) — only "mentions_dms" opts out of this
+      // team-wide fan-out, since mentions themselves are notified above regardless of mode.
+      if (m.notification_prefs?.chat?.mode !== 'mentions_dms') notify(m.user_id!, `New message in ${team.name}`, text.slice(0, 80));
     }
   };
 
@@ -3594,6 +3988,10 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
 
   return (
     <>
+      <div className="px-3 pt-2 shrink-0 flex items-center gap-1.5 text-[10px] text-ink-faint">
+        <span className={`w-1.5 h-1.5 rounded-full ${activeUserIds.length > 0 ? 'bg-success' : 'bg-ink-faint'}`} />
+        {activeUserIds.length === 0 ? 'No users active' : activeUserIds.length === 1 ? '1 user active' : `${activeUserIds.length} users active`}
+      </div>
       {pinned.length > 0 && (
         <div className="px-3 py-2 border-b border-hairline bg-accent-soft/40 space-y-1 shrink-0">
           {pinned.map(p => (
@@ -3613,6 +4011,7 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
             replied={m.reply_to_id ? messageById.get(m.reply_to_id) ?? null : null}
             isMine={m.sender_id === myUserId}
             canManage={canManage}
+            isVerified={members.find(mm => mm.user_id === m.sender_id)?.is_verified}
             reactions={reactionsByMessageId.get(m.id) ?? EMPTY_REACTIONS}
             myUserId={myUserId}
             teamId={team.id}
@@ -3622,8 +4021,10 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
             onEdit={(msg) => { setEditingId(msg.id); setBody(msg.body); }}
             onDelete={deleteTeamMessage}
             onPin={pinTeamMessage}
+            onReport={handleReportMessage}
             onDownloadAttachment={(channelId, msgId, name) => cc.downloadTaskAttachment(channelId, msgId, name)}
-            onToggleReaction={toggleReaction}
+            onFetchAttachmentPreview={(channelId, msgId, mimeType) => cc.fetchAttachmentBlobUrl(channelId, msgId, mimeType)}
+            onToggleReaction={handleToggleReaction}
           />
         ))}
         {showJumpToEnd && (
@@ -3637,14 +4038,14 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
       </div>
       {Object.keys(typingUsers).length > 0 && (
         <div className="px-3 pb-1 shrink-0 flex items-center gap-2 animate-fade-in-up">
-          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-ink/[0.05] border border-hairline text-[11px] text-ink-muted">
-            {(() => {
-              const names = Object.values(typingUsers);
-              if (names.length === 1) return `${names[0]} is typing`;
-              if (names.length === 2) return `${names[0]} and ${names[1]} are typing`;
-              return `${names.length} people are typing`;
-            })()}
-            <span className="inline-flex gap-0.5 ml-0.5">
+          <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full bg-ink/[0.05] border border-hairline">
+            <span className="flex -space-x-1.5">
+              {Object.keys(typingUsers).slice(0, 4).map(userId => {
+                const m = members.find(mm => mm.user_id === userId);
+                return <ChatAvatar key={userId} name={m?.profile?.name || 'Member'} avatar={m?.profile?.avatar} size={18} />;
+              })}
+            </span>
+            <span className="inline-flex gap-0.5">
               <span className="w-1 h-1 rounded-full bg-ink-faint animate-typing-dot [animation-delay:0ms]" />
               <span className="w-1 h-1 rounded-full bg-ink-faint animate-typing-dot [animation-delay:150ms]" />
               <span className="w-1 h-1 rounded-full bg-ink-faint animate-typing-dot [animation-delay:300ms]" />
@@ -3670,8 +4071,22 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
         )}
         <div className="flex gap-2">
           <input ref={fileInputRef} type="file" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) handleAttach(f); }} />
-          <button type="button" onClick={() => fileInputRef.current?.click()} disabled={attaching} className="p-2 rounded-xl text-ink-faint hover:text-accent hover:bg-accent-soft transition-colors shrink-0">
+          <button type="button" onClick={() => fileInputRef.current?.click()} disabled={attaching} title="Attach file" className="p-2 rounded-xl text-ink-faint hover:text-accent hover:bg-accent-soft transition-colors shrink-0">
             <Paperclip size={16} />
+          </button>
+          <input ref={photoInputRef} type="file" accept="image/*" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) handleAttach(f); }} />
+          <button type="button" onClick={() => photoInputRef.current?.click()} disabled={attaching} title="Send a photo" className="p-2 rounded-xl text-ink-faint hover:text-accent hover:bg-accent-soft transition-colors shrink-0">
+            <ImagePlus size={16} />
+          </button>
+          <button
+            type="button"
+            onClick={voiceRecorder.toggle}
+            disabled={attaching}
+            className={`p-2 rounded-xl transition-colors shrink-0 ${voiceRecorder.isRecording ? 'text-white bg-danger animate-pulse' : 'text-ink-faint hover:text-accent hover:bg-accent-soft'}`}
+            aria-label={voiceRecorder.isRecording ? 'Stop recording' : 'Record voice message'}
+            title={voiceRecorder.isRecording ? 'Stop recording' : 'Record voice message'}
+          >
+            <Mic size={16} />
           </button>
           <Input placeholder={editingId ? 'Edit message...' : 'Message the team...'} value={body} onChange={e => handleBodyChange(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSend()} className="flex-1" />
           <Button onClick={handleSend}><Send size={14} /></Button>
@@ -3734,6 +4149,7 @@ function DirectThread({ team, partnerId, partnerName, partnerAvatar, onBack, onO
   const [attaching, setAttaching] = useState(false);
   const { scrollRef, showJumpToEnd, handleScroll, jumpToEnd, pinToBottom } = useChatScroll(messages.length);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const photoInputRef = useRef<HTMLInputElement>(null);
   const { session } = useTeamAuth();
   const myUserId = session?.user.id;
 
@@ -3749,6 +4165,43 @@ function DirectThread({ team, partnerId, partnerName, partnerAvatar, onBack, onO
     return () => { mounted = false; unsubscribe(); unsubReactions(); };
   }, [team.id, partnerId]);
 
+  const [onlineUserIds, setOnlineUserIds] = useState<string[]>([]);
+  useEffect(() => {
+    if (!myUserId) return;
+    return subscribeToGlobalPresence(myUserId, setOnlineUserIds);
+  }, [myUserId]);
+  const isPartnerOnline = onlineUserIds.includes(partnerId);
+
+  const handleReportMessage = async (m: DirectMessage) => {
+    const { value: reason } = await swal({
+      title: 'Report message to admin',
+      input: 'textarea',
+      inputLabel: 'Why are you reporting this message?',
+      showCancelButton: true,
+      confirmButtonText: 'Report',
+    });
+    if (!reason) return;
+    const error = await reportMessage(team.id, 'direct_messages', m.id, reason);
+    if (error) { swal({ icon: 'error', title: 'Could not report message', text: error }); return; }
+    swalToast({ icon: 'success', title: 'Reported to admins' });
+  };
+
+  const handleToggleReaction = async (tId: string, table: 'direct_messages', messageId: string, emoji: string) => {
+    if (!myUserId) return;
+    const existing = reactions.find(r => r.message_id === messageId && r.emoji === emoji && r.user_id === myUserId);
+    if (existing) {
+      setReactions(prev => prev.filter(r => r.id !== existing.id));
+    } else {
+      const optimistic: MessageReaction = { id: crypto.randomUUID(), message_id: messageId, message_table: table, team_id: tId, user_id: myUserId, emoji, created_at: new Date().toISOString() };
+      setReactions(prev => [...prev, optimistic]);
+    }
+    const error = await toggleReaction(tId, table, messageId, emoji);
+    if (error) {
+      swalToast({ icon: 'error', title: 'Could not react' });
+      listReactions(team.id, 'direct_messages').then(setReactions);
+    }
+  };
+
   const messageById = new Map(messages.map(m => [m.id, m]));
   const reactionsByMessageId = new Map<string, MessageReaction[]>();
   for (const r of reactions) {
@@ -3757,7 +4210,7 @@ function DirectThread({ team, partnerId, partnerName, partnerAvatar, onBack, onO
     reactionsByMessageId.set(r.message_id, list);
   }
 
-  const handleAttach = async (file: File) => {
+  const handleAttach = async (file: File, captionOverride?: string) => {
     if (!team.telegram_channel_id || !cc.isConnected) {
       swal({ icon: 'info', title: 'Connect Telegram', text: 'Connect Telegram and set the team channel to send files in chat.' });
       return;
@@ -3771,7 +4224,7 @@ function DirectThread({ team, partnerId, partnerName, partnerAvatar, onBack, onO
     setAttaching(false);
     if (result) {
       const id = crypto.randomUUID();
-      const text = body.trim() || `📎 ${result.name}`;
+      const text = body.trim() || captionOverride || `📎 ${result.name}`;
       pinToBottom();
       setMessages(prev => upsertById(prev, {
         id, team_id: team.id, sender_id: myUserId || '', receiver_id: partnerId, body: text, read: false,
@@ -3782,6 +4235,8 @@ function DirectThread({ team, partnerId, partnerName, partnerAvatar, onBack, onO
       setBody(''); setReplyTo(null);
     }
   };
+
+  const voiceRecorder = useVoiceRecorder((file) => handleAttach(file, '🎤 Voice message'));
 
   const handleSend = async () => {
     if (!body.trim()) return;
@@ -3817,7 +4272,10 @@ function DirectThread({ team, partnerId, partnerName, partnerAvatar, onBack, onO
           <ArrowLeft size={14} />
         </button>
         <button type="button" onClick={() => onOpenProfile(partnerId)} className="flex items-center gap-2 hover:opacity-80">
-          <ChatAvatar name={partnerName} avatar={partnerAvatar} size={24} />
+          <span className="relative">
+            <ChatAvatar name={partnerName} avatar={partnerAvatar} size={24} />
+            {isPartnerOnline && <span className="absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full bg-success border border-surface" />}
+          </span>
           <p className="text-sm font-semibold text-ink">{partnerName}</p>
         </button>
       </div>
@@ -3829,6 +4287,7 @@ function DirectThread({ team, partnerId, partnerName, partnerAvatar, onBack, onO
             replied={m.reply_to_id ? messageById.get(m.reply_to_id) ?? null : null}
             isMine={m.sender_id !== partnerId}
             partnerId={partnerId}
+            isPartnerOnline={isPartnerOnline}
             reactions={reactionsByMessageId.get(m.id) ?? EMPTY_REACTIONS}
             myUserId={myUserId}
             teamId={team.id}
@@ -3836,10 +4295,12 @@ function DirectThread({ team, partnerId, partnerName, partnerAvatar, onBack, onO
             partnerName={partnerName}
             partnerAvatar={partnerAvatar}
             onDownloadAttachment={(channelId, msgId, name) => cc.downloadTaskAttachment(channelId, msgId, name)}
+            onFetchAttachmentPreview={(channelId, msgId, mimeType) => cc.fetchAttachmentBlobUrl(channelId, msgId, mimeType)}
             onReply={setReplyTo}
             onEdit={(msg) => { setEditingId(msg.id); setBody(msg.body); }}
             onDelete={deleteDirectMessage}
-            onToggleReaction={toggleReaction}
+            onReport={handleReportMessage}
+            onToggleReaction={handleToggleReaction}
           />
         ))}
         {showJumpToEnd && (
@@ -3859,8 +4320,22 @@ function DirectThread({ team, partnerId, partnerName, partnerAvatar, onBack, onO
       )}
       <div className="p-3 border-t border-hairline flex gap-2 shrink-0">
         <input ref={fileInputRef} type="file" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) handleAttach(f); }} />
-        <button type="button" onClick={() => fileInputRef.current?.click()} disabled={attaching} className="p-2 rounded-xl text-ink-faint hover:text-accent hover:bg-accent-soft transition-colors shrink-0">
+        <button type="button" onClick={() => fileInputRef.current?.click()} disabled={attaching} title="Attach file" className="p-2 rounded-xl text-ink-faint hover:text-accent hover:bg-accent-soft transition-colors shrink-0">
           <Paperclip size={16} />
+        </button>
+        <input ref={photoInputRef} type="file" accept="image/*" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) handleAttach(f); }} />
+        <button type="button" onClick={() => photoInputRef.current?.click()} disabled={attaching} title="Send a photo" className="p-2 rounded-xl text-ink-faint hover:text-accent hover:bg-accent-soft transition-colors shrink-0">
+          <ImagePlus size={16} />
+        </button>
+        <button
+          type="button"
+          onClick={voiceRecorder.toggle}
+          disabled={attaching}
+          className={`p-2 rounded-xl transition-colors shrink-0 ${voiceRecorder.isRecording ? 'text-white bg-danger animate-pulse' : 'text-ink-faint hover:text-accent hover:bg-accent-soft'}`}
+          aria-label={voiceRecorder.isRecording ? 'Stop recording' : 'Record voice message'}
+          title={voiceRecorder.isRecording ? 'Stop recording' : 'Record voice message'}
+        >
+          <Mic size={16} />
         </button>
         <Input placeholder={editingId ? 'Edit message...' : 'Type a message...'} value={body} onChange={e => setBody(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSend()} className="flex-1" />
         <Button onClick={handleSend}><Send size={14} /></Button>
@@ -4104,9 +4579,9 @@ function AdminSection({ team, members, onChanged }: { team: Team; members: TeamM
           <button
             type="button"
             onClick={() => joinAdInputRef.current?.click()}
-            className="w-full aspect-[16/6] rounded-xl overflow-hidden border border-dashed border-hairline flex items-center justify-center bg-ink/[0.02] hover:bg-ink/[0.05] transition-colors"
+            className="w-full max-h-56 rounded-xl overflow-hidden border border-dashed border-hairline flex items-center justify-center bg-ink/[0.02] hover:bg-ink/[0.05] transition-colors"
           >
-            {joinAdUrl ? <img src={joinAdUrl} alt="Join ad" className="w-full h-full object-cover" /> : <ImagePlus size={20} className="text-ink-faint" />}
+            {joinAdUrl ? <img src={joinAdUrl} alt="Join ad" className="w-full max-h-56 object-contain" /> : <ImagePlus size={20} className="text-ink-faint" />}
           </button>
           <input ref={joinAdInputRef} type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) readAvatarFile(f, setJoinAdUrl, 480); }} />
         </div>

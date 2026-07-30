@@ -6,6 +6,7 @@ export interface JoinRequest {
   team_id: string;
   user_id: string;
   message: string;
+  job_types: string[];
   status: 'pending' | 'approved' | 'rejected';
   created_at: string;
   user?: { name: string; email: string } | null;
@@ -22,8 +23,23 @@ async function rpc(fn: string, args: Record<string, unknown>): Promise<string | 
   return error ? error.message : null;
 }
 
-export const requestToJoinTeam = (teamId: string, message: string) =>
-  rpc('request_to_join_team', { _team_id: teamId, _message: message });
+export const requestToJoinTeam = (teamId: string, message: string, jobTypes: string[] = []) =>
+  rpc('request_to_join_team', { _team_id: teamId, _message: message, _job_types: jobTypes });
+
+/** A user's own join-request history across every team they've applied to — item 17's
+ *  "show my accept/refuse history for team invites/requests" — no new table needed, the rows
+ *  already carry status. */
+export async function listMyJoinRequestHistory(): Promise<(JoinRequest & { team: { name: string; logo: string } | null })[]> {
+  const { data: userData } = await supabase.auth.getUser();
+  const userId = userData.user?.id;
+  if (!userId) return [];
+  const { data } = await supabase
+    .from('join_requests')
+    .select('*, team:teams(name, logo)')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false });
+  return (data as unknown as (JoinRequest & { team: { name: string; logo: string } | null })[]) ?? [];
+}
 
 export interface TeamInviteToken {
   id: string;

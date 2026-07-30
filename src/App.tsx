@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
   Plus, Trash2, BookOpen, Layers, FileStack, ImagePlus, Sparkles, Boxes, Download, Upload,
-  UploadCloud, FileArchive, Tag, X, PackagePlus, Pencil
+  UploadCloud, FileArchive, X, PackagePlus, Pencil, Search
 } from 'lucide-react';
 import { get, set } from 'idb-keyval';
 import { MangaSeries, Volume, Chapter, Workspace, Page } from './types';
@@ -25,6 +25,8 @@ import { Modal, Button, Input, Textarea, GlassCard, SkeletonCard, AppContextMenu
 import { Studio } from './components/studio/Studio';
 import { StudioBuildTransition } from './components/studio/StudioBuildTransition';
 import { TextEditorPage } from './components/textEditor/TextEditorPage';
+import { applyTyperInsertMode, type TyperSendRequest } from './lib/typerBridge';
+import { loadChapterStudioData, saveChapterStudioData, createEmptyStudioData } from './lib/studioProjectStore';
 import { useAutomationEngine } from './lib/automationEngine';
 import { useCloudClient } from './lib/cloudClient';
 import { migrateWorkspace } from './lib/migrate';
@@ -50,8 +52,19 @@ export default function App() {
   const [activeMangaId, setActiveMangaId] = useState<string | null>(null);
   const [activeVolumeId, setActiveVolumeId] = useState<string | null>(null);
   const [activeChapterId, setActiveChapterId] = useState<string | null>(null);
+  // The page currently active inside Studio, live — reported up via Studio's onActivePageChange
+  // prop so the standalone Text Editor's split-screen preview (a completely separate tab) can
+  // follow along. Deliberately not reset when Studio unmounts: the last page viewed is a
+  // reasonable starting point for the preview, not a stale value to discard.
+  const [studioActivePageId, setStudioActivePageId] = useState<string | null>(null);
 
   const [activeNavigationTab, setActiveNavigationTab] = useState<NavTabId>('library');
+
+  // Desktop-only sidebar hide/show, persisted across sessions.
+  const [sidebarHidden, setSidebarHidden] = useState(() => localStorage.getItem('sidebar_hidden') === '1');
+  useEffect(() => {
+    localStorage.setItem('sidebar_hidden', sidebarHidden ? '1' : '0');
+  }, [sidebarHidden]);
 
   // Create workspace modal
   const [showCreateWorkspaceModal, setShowCreateWorkspaceModal] = useState(false);
@@ -65,6 +78,10 @@ export default function App() {
   // Tag editor modal
   const [tagEditorWorkspaceId, setTagEditorWorkspaceId] = useState<string | null>(null);
   const [newTagValue, setNewTagValue] = useState('');
+
+  // Workspace search — toggled from a small icon next to "My Workspaces", filters by name/tag.
+  const [workspaceSearchOpen, setWorkspaceSearchOpen] = useState(false);
+  const [workspaceSearchQuery, setWorkspaceSearchQuery] = useState('');
 
   // Studio entrance transition — set on a chapter-card click, cleared once
   // StudioBuildTransition finishes and hands off to setActiveChapterId.
@@ -113,9 +130,6 @@ export default function App() {
   const [showPrivacyModal, setShowPrivacyModal] = useState(false);
   const [showTermsModal, setShowTermsModal] = useState(false);
 
-  // Bridges "Send to TypeR" from the standalone Text Editor page into whichever chapter's
-  // Studio the user next opens — Studio consumes and clears this on mount.
-  const [pendingTyperScript, setPendingTyperScript] = useState<string | null>(null);
   // Carries a `?join=<token>` invite link into the Teams tab on load, redeemed
   // (as a join request, not an auto-join) then cleared from the URL.
   const [pendingJoinToken, setPendingJoinToken] = useState<string | null>(null);
@@ -189,23 +203,11 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cloudClient.isConnected, cloudClient.chatId, isLoadingLibrary]);
 
-  // Once per session, nudge the user if it's been 7+ days since their last
-  // successful Telecloud backup.
-  const backupReminderShownRef = useRef(false);
-  useEffect(() => {
-    if (backupReminderShownRef.current) return;
-    backupReminderShownRef.current = true;
-    const lastBackupAt = Number(localStorage.getItem('tg_last_backup_at') || 0);
-    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
-    if (!lastBackupAt || Date.now() - lastBackupAt > sevenDaysMs) {
-      swalToast({
-        icon: 'warning',
-        title: 'Back up your library',
-        text: "It's been over 7 days since your last Telecloud backup.",
-        timer: 6000,
-      });
-    }
-  }, []);
+  const visibleWorkspaces = (() => {
+    const q = workspaceSearchQuery.trim().toLowerCase();
+    if (!q) return workspaces;
+    return workspaces.filter(w => w.name.toLowerCase().includes(q) || w.tags.some(t => t.toLowerCase().includes(q)));
+  })();
 
   const activeWorkspace = workspaces.find(w => w.id === activeWorkspaceId) || null;
   const mangas = activeWorkspace?.mangas || [];
@@ -218,6 +220,47 @@ export default function App() {
     setActiveMangaId(null);
     setActiveVolumeId(null);
     setActiveChapterId(null);
+  };
+
+  /** Opens a chapter's Studio, whatever it takes to get there from wherever the user currently
+   *  is — walks `workspaces` for the chapter's own workspace/manga/volume ancestry (only its id is
+   *  known at the call site) and sets the whole active chain plus the nav tab in one go. */
+  const navigateToChapterStudio = (chapterId: string) => {
+    for (const ws of workspaces) {
+      for (const manga of ws.mangas) {
+        for (const vol of manga.volumes) {
+          if (vol.chapters.some(c => c.id === chapterId)) {
+            setActiveWorkspaceId(ws.id);
+            setActiveMangaId(manga.id);
+            setActiveVolumeId(vol.id);
+            setActiveChapterId(chapterId);
+            setActiveNavigationTab('library');
+            return;
+          }
+        }
+      }
+    }
+  };
+
+  /** Send-to-TypeR dialog's confirm handler. `TextEditorPage` only ever renders while the nav tab
+   *  is 'text-editor', which is mutually exclusive with 'library' (the only tab Studio ever mounts
+   *  under) — so there is never a live Studio instance to hand this to directly, for *any* target
+   *  chapter, including whichever one happens to be "current." Writing straight into the target
+   *  chapter's persisted studioProjectStore data and only *then* navigating to open its Studio
+   *  sidesteps a real race a live in-Studio bridge would otherwise hit: Studio's own mount-time
+   *  effect reloads typerScript from disk, and on a fresh mount that reload finishes after any
+   *  synchronous bridge write, silently clobbering it. Writing to disk first means Studio's own
+   *  load simply picks up the already-correct value — no race. "insert-line" has no live cursor to
+   *  target either (TypeR's line position is pure in-memory Studio state, reset to 0 on every
+   *  mount) — inserting at the top is exactly where a freshly-opened TypeR session would be
+   *  sitting anyway, so `applyTyperInsertMode`'s default `atLine` of 0 is the correct target, not
+   *  an approximation. */
+  const handleSendToTyper = async (req: TyperSendRequest) => {
+    const data = await loadChapterStudioData(req.chapterId).catch(() => null);
+    const base = data ?? createEmptyStudioData();
+    const nextScript = applyTyperInsertMode(base.typerScript, req.text, req.mode);
+    await saveChapterStudioData(req.chapterId, { ...base, typerScript: nextScript, updatedAt: new Date().toISOString() }).catch(console.error);
+    navigateToChapterStudio(req.chapterId);
   };
 
   const resetToLibraryRoot = () => {
@@ -725,9 +768,15 @@ export default function App() {
         />
       )}
 
-      <SidebarRail activeTab={activeNavigationTab} onTabChange={setActiveNavigationTab} onCreatePress={handleCreatePress} />
+      <SidebarRail
+        activeTab={activeNavigationTab}
+        onTabChange={setActiveNavigationTab}
+        onCreatePress={handleCreatePress}
+        hidden={sidebarHidden}
+        onToggleHidden={() => setSidebarHidden(h => !h)}
+      />
 
-      <div className="flex flex-1 lg:pl-20">
+      <div className={`flex flex-1 ${sidebarHidden ? '' : 'lg:pl-20'}`}>
         <main key={activeNavigationTab} className="animate-view-fade flex-1 min-w-0 px-4 sm:px-6 lg:px-10 py-6 sm:py-8 pb-28 lg:pb-10 max-w-6xl mx-auto w-full">
           {activeNavigationTab === 'settings' && (
             <SettingsPanel
@@ -765,6 +814,12 @@ export default function App() {
                   setPendingTyperScript(script);
                   setActiveNavigationTab('library');
                 }}
+            <div className="fixed inset-0 lg:relative lg:inset-auto flex flex-col bg-elevated lg:rounded-2xl lg:overflow-hidden lg:border lg:border-hairline lg:h-[calc(100vh-8.5rem)] z-30">
+              <TextEditorPage
+                workspaces={workspaces}
+                activeChapterId={activeChapterId}
+                studioActivePageId={studioActivePageId}
+                onSendToTyper={handleSendToTyper}
               />
             </div>
           )}
@@ -809,10 +864,9 @@ export default function App() {
                   chapterName={activeChapter.name}
                   pages={activeChapter.pages}
                   onBack={resetToLibraryRoot}
-                  pendingTyperScript={pendingTyperScript}
-                  onConsumePendingTyperScript={() => setPendingTyperScript(null)}
                   onPagesChange={handleChapterPagesChange}
                   onExportMsp={() => handleExportWorkspace(activeWorkspace)}
+                  onActivePageChange={setStudioActivePageId}
                 />
               )}
 
@@ -1030,14 +1084,44 @@ export default function App() {
               {/* Workspace list (root) */}
               {!activeWorkspace && (
                 <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <h2 className="text-lg font-display font-semibold text-ink">My Workspaces</h2>
-                    <div className="flex items-center gap-2">
-                      <Button size="sm" variant="secondary" onClick={() => mspImportInputRef.current?.click()}>
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                    <h2 className="text-lg font-display font-semibold text-ink shrink-0">My Workspaces</h2>
+                    <div className="flex items-center gap-2 overflow-x-auto no-scrollbar -mx-1 px-1 sm:mx-0 sm:px-0">
+                      {workspaceSearchOpen ? (
+                        <div className="flex items-center gap-1.5 bg-ink/5 border border-hairline rounded-xl px-2.5 h-8 shrink-0">
+                          <Search size={14} className="text-ink-faint shrink-0" />
+                          <input
+                            autoFocus
+                            type="text"
+                            placeholder="Search workspaces..."
+                            value={workspaceSearchQuery}
+                            onChange={(e) => setWorkspaceSearchQuery(e.target.value)}
+                            onKeyDown={(e) => { if (e.key === 'Escape') { setWorkspaceSearchOpen(false); setWorkspaceSearchQuery(''); } }}
+                            className="bg-transparent outline-none text-xs text-ink placeholder:text-ink-faint w-28 sm:w-44"
+                          />
+                          <button
+                            onClick={() => { setWorkspaceSearchOpen(false); setWorkspaceSearchQuery(''); }}
+                            aria-label="Close search"
+                            className="text-ink-faint hover:text-ink shrink-0"
+                          >
+                            <X size={13} />
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setWorkspaceSearchOpen(true)}
+                          aria-label="Search workspaces"
+                          title="Search workspaces"
+                          className="p-1.5 rounded-lg hover:bg-ink/10 text-ink-faint hover:text-ink transition-colors shrink-0"
+                        >
+                          <Search size={16} />
+                        </button>
+                      )}
+                      <Button size="sm" variant="secondary" className="shrink-0" onClick={() => mspImportInputRef.current?.click()}>
                         <Upload size={14} /> Import Project
                       </Button>
                       <input ref={mspImportInputRef} type="file" accept=".msp" className="hidden" onChange={handleImportMspFile} />
-                      <Button size="sm" variant="secondary" onClick={() => zipImportInputRef.current?.click()}>
+                      <Button size="sm" variant="secondary" className="shrink-0" onClick={() => zipImportInputRef.current?.click()}>
                         <PackagePlus size={14} /> Import ZIP
                       </Button>
                       <input ref={zipImportInputRef} type="file" accept=".zip" className="hidden" onChange={handleImportZipFile} />
@@ -1056,9 +1140,15 @@ export default function App() {
                       <p className="text-sm text-ink-muted max-w-sm">Tap the + button below to create a workspace and start organizing your manga and manhwa libraries.</p>
                     </GlassCard>
                   )}
+                  {!isLoadingLibrary && workspaces.length > 0 && visibleWorkspaces.length === 0 && (
+                    <GlassCard className="p-10 flex flex-col items-center text-center gap-3">
+                      <Search className="text-ink-faint" size={30} />
+                      <p className="text-sm text-ink-muted max-w-sm">No workspaces match "{workspaceSearchQuery}".</p>
+                    </GlassCard>
+                  )}
                   {!isLoadingLibrary && (
                   <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
-                    {interleaveWithAds(workspaces, ws => (
+                    {interleaveWithAds(visibleWorkspaces, ws => (
                       <button key={ws.id} onClick={() => setActiveWorkspaceId(ws.id)} className="stagger-item group relative text-left overflow-hidden rounded-2xl">
                         <GlassCard className="overflow-hidden flex flex-col h-full transition-transform group-hover:-translate-y-0.5">
                           <div className="aspect-[3/4] bg-gradient-to-br from-accent/25 to-accent/5 flex items-center justify-center overflow-hidden">
@@ -1107,14 +1197,6 @@ export default function App() {
                             title="Upload to Telecloud"
                           >
                             <UploadCloud size={12} />
-                          </button>
-                          <button
-                            onClick={(e) => { e.stopPropagation(); setTagEditorWorkspaceId(ws.id); }}
-                            className="p-1.5 rounded-lg bg-black/40 text-white hover:bg-black/60"
-                            aria-label="Edit tags"
-                            title="Edit tags"
-                          >
-                            <Tag size={12} />
                           </button>
                           <button
                             onClick={(e) => { e.stopPropagation(); handleExportWorkspace(ws); }}

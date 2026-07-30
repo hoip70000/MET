@@ -51,6 +51,11 @@ import type { BrushPreset } from '../../lib/brushStore';
 import { AdjustmentPanel } from './AdjustmentPanel';
 import { FilterDialog } from './filters/FilterDialog';
 import { FILTER_DIALOG_CONFIGS, type FilterConfig } from './filters/filterDialogConfigs';
+import { MagicErasePanel } from './MagicErasePanel';
+import { MagicEraseLoadingOverlay } from './MagicEraseLoadingOverlay';
+import { detectTextRegions, type TextRegion } from '../../lib/textDetect';
+import { callMagicErase, MagicEraseError } from '../../lib/magicErase';
+import { loadMagicEraseServer } from '../../lib/magicEraseStore';
 import {
   loadChapterStudioData, saveChapterStudioData, pushVersionSnapshot, STUDIO_SCHEMA_VERSION,
   type ChapterStudioData, type SerializedStudioLayer,
@@ -71,6 +76,10 @@ interface StudioProps {
   /** Project > Export as .msp — the existing workspace-level .msp export (App.tsx), threaded down so
    *  it's reachable from inside a chapter without Studio needing the whole `Workspace` object itself. */
   onExportMsp?: () => void;
+  /** Reports the active page id up to App.tsx on every change — lets the standalone Text Editor's
+   *  split-screen page preview follow along live even though it's a completely separate top-level
+   *  tab with no other visibility into Studio's internal state. */
+  onActivePageChange?: (pageId: string | null) => void;
 }
 
 export function Studio(props: StudioProps) {
@@ -85,7 +94,7 @@ export function Studio(props: StudioProps) {
   );
 }
 
-function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript, onConsumePendingTyperScript, onPagesChange, onExportMsp }: StudioProps) {
+function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript, onConsumePendingTyperScript, onPagesChange, onExportMsp, onActivePageChange }: StudioProps) {
   const canvasRef = useRef<StudioCanvasHandle>(null);
   const { foreground, background, setForeground, swap: swapColors, reset: resetColors } = useColor();
   const history = useHistory();
@@ -280,6 +289,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     onToggleMultiBubble: () => setMultiBubbleMode(!multiBubbleMode),
   });
   const [activePageId, setActivePageId] = useState<string | null>(pages[0]?.id ?? null);
+  useEffect(() => { onActivePageChange?.(activePageId); }, [activePageId, onActivePageChange]);
   const [pagesManagerOpen, setPagesManagerOpen] = useState(pages.length === 0);
   const [activeTool, setActiveTool] = useState('select');
   const [showCleaned, setShowCleaned] = useState(false);
@@ -292,10 +302,53 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
   // Left (Pages) / right (Tools) sidebar visibility. Desktop keeps both open as fixed columns by
   // default; tablet/phone treat these as slide-out sheets, so opening one there closes the other
   // to avoid covering the whole canvas.
-  const [leftOpen, setLeftOpen] = useState(true);
-  const [rightOpen, setRightOpen] = useState(true);
+  //
+  // Investigation notes (tool-rail-overlapping-canvas bug, this pass):
+  // 1. Studio shell layout: the body below the toolbar is `<div className="flex-1 flex min-h-0
+  //    relative">` (~line 2166) — a real flexbox row, not absolute/grid-based. Its children in DOM
+  //    order are: left Pages panel (desktop only) -> canvas (`flex-1 min-h-0 min-w-0 relative`,
+  //    always present) -> right Tools sidebar (desktop only) -> tablet-only left/right drawers and
+  //    a tablet-only permanent rail column -> phone-only bottom sheets.
+  // 2. `ToolRail.tsx` itself (vertical orientation) is `w-12 shrink-0` with no `position` override
+  //    at all — a plain flex child. At every breakpoint it's rendered as a genuine, non-overlapping
+  //    flex sibling of the canvas (desktop: inside the right sidebar's own `h-full shrink-0
+  //    relative z-30` wrapper at ~line 2181; tablet: its own `h-full shrink-0 relative z-30 pr-12`
+  //    wrapper at ~line 2208), never `position: absolute`/`fixed`, and never nested inside the
+  //    canvas's own container.
+  // 3. `StudioCanvas.tsx`'s root is `relative w-full h-full overflow-hidden` (not absolute/fixed),
+  //    sized via a `ResizeObserver` on that same element — it fills whatever width its flex parent
+  //    actually gives it, and reacts correctly when a sibling's width changes.
+  // 4. Confirmed: this app's actual, intentional column order is `Pages (left) | Canvas (center) |
+  //    Tools (right)` (an explicit comment at ~line 2163 predates this pass) — the tool rail sits
+  //    immediately right of the canvas, adjacent to the Color/Layers panel stack, not on the left.
+  //    Per explicit confirmation this session, that side is correct and unchanged by this fix.
+  // 5. z-index (`z-20`/`z-30`) only matters among elements that already occupy overlapping boxes;
+  //    since the rail and canvas are genuine flex siblings with non-overlapping boxes, z-index was
+  //    never the actual mechanism here — consistent with the prior attempt's own reasoning.
+  //
+  // The real remaining bug: `leftOpen`/`rightOpen` unconditionally defaulted to `true` regardless
+  // of viewport. That default is correct semantics for desktop, where both render as permanent
+  // flex columns — but at tablet/phone widths, `leftOpen`/`rightOpen` instead gate `position:
+  // absolute` overlay *drawers* (~line 2186 and ~line 2212) that float on top of the canvas by
+  // design (that's how a slide-out sheet is supposed to work while genuinely open). Defaulting both
+  // to `true` meant that on first load — or on entering a chapter — at tablet/phone width, *both*
+  // overlay drawers rendered open simultaneously, immediately covering the canvas from both sides
+  // at once, with only a thin sliver of actual page visible between them (and, at phone width, the
+  // tool rail itself lives inside that same right-hand overlay sheet, so it visually reads as "tool
+  // icons on top of the page"). `toggleLeftSidebar`/`toggleRightSidebar` already correctly close the
+  // opposite side on non-desktop *once the user interacts* — the gap was purely the initial default
+  // never accounting for `layoutMode` at all. Fixed below by deriving the initial value from the
+  // same `(min-width: 1024px)` check `layoutMode`'s own initializer already uses, rather than a
+  // bare `true` — both drawers now start closed on tablet/phone and open as permanent columns on
+  // desktop, matching what was already the intended, documented behavior for each breakpoint.
+  const [leftOpen, setLeftOpen] = useState(() => typeof window === 'undefined' || window.matchMedia('(min-width: 1024px)').matches);
+  const [rightOpen, setRightOpen] = useState(() => typeof window === 'undefined' || window.matchMedia('(min-width: 1024px)').matches);
   const leftSidebarRef = useRef<HTMLDivElement>(null);
   const rightSidebarRef = useRef<HTMLDivElement>(null);
+  // Tablet keeps the tool rail itself docked as a permanent, non-overlapping column (see the
+  // tablet-layout block below) — only the wider panel drawer slides over the canvas as an overlay.
+  // Outside-pointerdown-closes-the-drawer logic must not treat a click on the rail as "outside".
+  const rightRailRef = useRef<HTMLDivElement>(null);
 
   function toggleLeftSidebar() {
     setLeftOpen(v => {
@@ -354,6 +407,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
   // it, and typerIndex/typerArmed/etc. above stay exactly where they are regardless of floating vs
   // docked — StudioCanvas reads them for canvas-click placement either way. Persisted the same
   // debounced-localStorage way PanelLayoutContext persists panel order/collapse; Studio.tsx fully unmounts
+  // debounced-localStorage way DockContext persists the active dock tab; Studio.tsx fully unmounts
   // on chapter switch (a fresh mount is a fresh chapter), so a lazy useState initializer is enough —
   // no re-seed-on-chapterId-change effect needed.
   const [typerFloating, setTyperFloating] = useState(() => {
@@ -377,6 +431,32 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     }, 400);
     return () => clearTimeout(t);
   }, [chapterId, typerFloatPos]);
+  // Magic Erase: local OCR text detection + per-block flat-color fill or AI inpaint via a
+  // user-configured server (address set in Settings, see magicEraseStore.ts). Regions are keyed to
+  // the page they were detected on so switching pages doesn't leave stale boxes pointing at
+  // coordinates on a different image.
+  const [magicEraseServer, setMagicEraseServer] = useState('');
+  useEffect(() => { loadMagicEraseServer().then(setMagicEraseServer); }, []);
+  const [magicEraseRegions, setMagicEraseRegions] = useState<TextRegion[]>([]);
+  const [magicEraseRegionsPageId, setMagicEraseRegionsPageId] = useState<string | null>(null);
+  const [magicEraseSelectedIds, setMagicEraseSelectedIds] = useState<Set<string>>(new Set());
+  const [magicEraseMinConfidence, setMagicEraseMinConfidence] = useState(60);
+  const [magicEraseFillColor, setMagicEraseFillColor] = useState('#ffffff');
+  const [magicEraseDetecting, setMagicEraseDetecting] = useState(false);
+  const [magicEraseDetectProgress, setMagicEraseDetectProgress] = useState(0);
+  const [magicEraseBusy, setMagicEraseBusy] = useState(false);
+  // A page switch invalidates detected regions — they were measured against whatever page was
+  // active at detect time, and this app's other per-page scratch state (Quick Mask, queued
+  // Multi-Bubble/Slice rects) is cleared the same way rather than silently pointing at the wrong page.
+  useEffect(() => {
+    if (magicEraseRegionsPageId && magicEraseRegionsPageId !== activePageId) {
+      setMagicEraseRegions([]);
+      setMagicEraseSelectedIds(new Set());
+      setMagicEraseRegionsPageId(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePageId]);
+
   // Configurable versions of what used to be a hardcoded "##" ignore-prefix and an implicit
   // empty-prefix-style default, plus arbitrary mid-line tag stripping — mirrors the real TypeR
   // extension's ignoreLinePrefixes/ignoreTags/defaultStyleId settings.
@@ -1552,6 +1632,138 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     setSelection(pathToSelection(activeLayer.path));
   }
 
+  /** Reuses the topmost existing raster layer (matching the paint-tool auto-create effect and
+   *  Stroke/Fill Path's own target-picking convention above) or creates one — Magic Erase's flat-
+   *  color fill is just another paint-family write onto the active clean-patch layer. */
+  function ensureMagicEraseRasterLayer(): string {
+    const existing = topmostRasterLayer();
+    if (existing) return existing.id;
+    const layer = createLayer('clean-patch', `Layer ${flattenTree(layers).length}`);
+    updateLayers(current => [...current, layer], 'Add Layer');
+    setActiveLayerId(layer.id);
+    canvasRef.current?.seedLayerWithBackground(layer.id);
+    return layer.id;
+  }
+
+  async function handleMagicEraseDetectText() {
+    if (!activePageId || !canvasRef.current) return;
+    const snapshot = canvasRef.current.getExportSnapshot();
+    if (!snapshot) return;
+    setMagicEraseDetecting(true);
+    setMagicEraseDetectProgress(0);
+    try {
+      const flattened = await renderFlattenedPage(snapshot);
+      const regions = await detectTextRegions(flattened, {
+        minConfidence: magicEraseMinConfidence,
+        onProgress: setMagicEraseDetectProgress,
+      });
+      setMagicEraseRegions(regions);
+      setMagicEraseRegionsPageId(activePageId);
+      setMagicEraseSelectedIds(new Set(regions.map(r => r.id)));
+      if (regions.length === 0) {
+        swalToast({ icon: 'info', title: 'No confident text found on this page' });
+      }
+    } catch {
+      swal({ icon: 'error', title: 'Text detection failed', text: 'Could not run local OCR on this page.' });
+    } finally {
+      setMagicEraseDetecting(false);
+    }
+  }
+
+  /** Flat-color fill for detected text blocks — either the whole selection at once (uniform) or a
+   *  single block at a time (the panel's per-row color swatch), same function either way since both
+   *  are just "paint these rects this color" onto the active raster layer. */
+  function handleMagicEraseFillRegions(regionIds: string[], color: string) {
+    if (regionIds.length === 0) return;
+    const targetIds = new Set(regionIds);
+    const targets = magicEraseRegions.filter(r => targetIds.has(r.id));
+    if (targets.length === 0) return;
+    const layerId = ensureMagicEraseRasterLayer();
+    const canvas = canvasRef.current?.getPaintCanvas(layerId);
+    const ctx = canvas?.getContext('2d');
+    if (!canvas || !ctx) return;
+    const before = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = color;
+    for (const region of targets) ctx.fillRect(region.x, region.y, region.width, region.height);
+    canvasRef.current?.redrawLayer(layerId);
+    handlePaintStrokeEnd(layerId, before);
+  }
+
+  /**
+   * Sends the flattened page plus a mask built from the selected text blocks (white = erase) to the
+   * user-configured Magic Erase server, and lands the returned inpainted image as a new top
+   * clean-patch layer — matches this app's "new layer = a working copy, never a destructive
+   * in-place edit" convention (see handleAddLayer), just seeded from the server's result instead of
+   * the background.
+   */
+  async function handleSendToMagicErase(regionIds: string[]) {
+    if (!activePageId || !canvasRef.current) return;
+    const targetIds = new Set(regionIds);
+    const targets = magicEraseRegions.filter(r => targetIds.has(r.id));
+    if (targets.length === 0) return;
+    if (!magicEraseServer.trim()) {
+      swal({ icon: 'warning', title: 'No Magic Erase server set', text: 'Add a server address in Settings first.' });
+      return;
+    }
+    const snapshot = canvasRef.current.getExportSnapshot();
+    if (!snapshot) return;
+
+    setMagicEraseBusy(true);
+    try {
+      const flattened = await renderFlattenedPage(snapshot);
+      const maskCanvas = document.createElement('canvas');
+      maskCanvas.width = flattened.width;
+      maskCanvas.height = flattened.height;
+      const maskCtx = maskCanvas.getContext('2d');
+      if (!maskCtx) throw new Error('Could not build a mask canvas.');
+      maskCtx.fillStyle = 'black';
+      maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
+      maskCtx.fillStyle = 'white';
+      for (const region of targets) maskCtx.fillRect(region.x, region.y, region.width, region.height);
+
+      const toBlob = (c: HTMLCanvasElement) => new Promise<Blob>((resolve, reject) => {
+        c.toBlob(b => (b ? resolve(b) : reject(new Error('Could not encode image.'))), 'image/png');
+      });
+      const [imageBlob, maskBlob] = await Promise.all([toBlob(flattened), toBlob(maskCanvas)]);
+      const resultBlob = await callMagicErase(magicEraseServer, imageBlob, maskBlob);
+      const resultUrl = URL.createObjectURL(resultBlob);
+      try {
+        const resultImg = await loadImageFromSrc(resultUrl);
+        const layer = createLayer('clean-patch', 'Magic Erase Result');
+        updateLayers(current => [...current, layer], 'Magic Erase');
+        setActiveLayerId(layer.id);
+        const canvas = canvasRef.current?.getPaintCanvas(layer.id);
+        const ctx = canvas?.getContext('2d');
+        if (canvas && ctx) {
+          const before = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(resultImg, 0, 0, canvas.width, canvas.height);
+          canvasRef.current?.redrawLayer(layer.id);
+          handlePaintStrokeEnd(layer.id, before);
+        }
+      } finally {
+        URL.revokeObjectURL(resultUrl);
+      }
+      setMagicEraseSelectedIds(prev => { const next = new Set(prev); for (const id of regionIds) next.delete(id); return next; });
+      swalToast({ icon: 'success', title: 'Magic Erase applied' });
+    } catch (err) {
+      swal({
+        icon: 'error',
+        title: 'Magic Erase failed',
+        text: err instanceof MagicEraseError ? err.message : 'Something went wrong reaching the server.',
+      });
+    } finally {
+      setMagicEraseBusy(false);
+    }
+  }
+
+  function handleMagicEraseToggleSelect(id: string) {
+    setMagicEraseSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
   /** The layer directly beneath the active one among its siblings — its clip base, if it can be one. */
   const layerBelowActive = (() => {
     if (!activeLayerId) return null;
@@ -1735,10 +1947,34 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     />
   );
 
+  const magicErasePanel = (
+    <MagicErasePanel
+      regions={magicEraseRegions}
+      selectedIds={magicEraseSelectedIds}
+      onToggleSelect={handleMagicEraseToggleSelect}
+      onSelectAll={() => setMagicEraseSelectedIds(new Set(magicEraseRegions.map(r => r.id)))}
+      onSelectNone={() => setMagicEraseSelectedIds(new Set())}
+      minConfidence={magicEraseMinConfidence}
+      onMinConfidenceChange={setMagicEraseMinConfidence}
+      detecting={magicEraseDetecting}
+      detectProgress={magicEraseDetectProgress}
+      onDetect={handleMagicEraseDetectText}
+      fillColor={magicEraseFillColor}
+      onFillColorChange={setMagicEraseFillColor}
+      onFillRegions={handleMagicEraseFillRegions}
+      serverConfigured={!!magicEraseServer.trim()}
+      erasing={magicEraseBusy}
+      onSendToMagicErase={handleSendToMagicErase}
+      onJumpToRegion={(region) => setSelection({ kind: 'rect', x: region.x, y: region.y, width: region.width, height: region.height })}
+      onOpenSettings={() => swalToast({ icon: 'info', title: 'Open the app\'s Settings tab to set a Magic Erase server' })}
+    />
+  );
+
   const allTabs = [
     ...(textPanel ? [{ id: 'text', label: 'Text', content: textPanel }] : []),
     ...(adjustmentPanel ? [{ id: 'adjustment', label: 'Adjustment', content: adjustmentPanel }] : []),
     { id: 'typer', label: 'TypeR', content: typerPanel },
+    { id: 'magicerase', label: 'Magic Erase', content: magicErasePanel },
     { id: 'translation', label: 'Translation', content: translationPanel },
     { id: 'brushes', label: 'Brushes', content: brushesPanel },
     { id: 'color', label: 'Color', content: colorPanel },
@@ -1917,7 +2153,12 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     if (isDesktop) return;
     function onPointerDown(e: PointerEvent) {
       if (leftOpen && leftSidebarRef.current && !leftSidebarRef.current.contains(e.target as Node)) setLeftOpen(false);
-      if (rightOpen && rightSidebarRef.current && !rightSidebarRef.current.contains(e.target as Node)) setRightOpen(false);
+      if (
+        rightOpen &&
+        rightSidebarRef.current &&
+        !rightSidebarRef.current.contains(e.target as Node) &&
+        !rightRailRef.current?.contains(e.target as Node)
+      ) setRightOpen(false);
     }
     window.addEventListener('pointerdown', onPointerDown);
     return () => window.removeEventListener('pointerdown', onPointerDown);
@@ -2068,6 +2309,9 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
 
         <div className="flex-1 min-h-0 min-w-0 relative">
           {canvasNode}
+          {(magicEraseBusy || magicEraseDetecting) && (
+            <MagicEraseLoadingOverlay label={magicEraseDetecting ? 'Scanning for text…' : 'Erasing with AI…'} />
+          )}
         </div>
 
         {!panelsHidden && isDesktop && rightOpen && (
@@ -2081,9 +2325,30 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
             <StudioPagesPanel pages={pages} activePageId={activePageId} onSelect={setActivePageId} orientation="vertical" onManagePages={() => setPagesManagerOpen(true)} />
           </div>
         )}
+        {/* Tablet: the tool rail stays a permanent, non-overlapping column (matching desktop)
+            instead of riding along inside the panel drawer's slide-over overlay — the rail is a
+            handful of narrow icon buttons, not the space-hungry part, so there's no reason for it
+            to ever sit on top of the canvas. Only the wider panel stack (Color/Layers/etc.) still
+            slides over the canvas as a drawer at this breakpoint, anchored flush against the rail
+            (`right-12` = the rail's own w-12) rather than the container's true right edge, so it
+            doesn't overlap the rail either.
+            `pr-12` reserves one more rail-width of empty space past the rail's true edge: a
+            tool-group flyout (`ToolFlyout.tsx`) opens flush to the right of a vertical rail and,
+            by design, is only ever nudged back on-screen *vertically* — never flipped or shifted
+            horizontally, since "which side it opens on" is fixed. That's safe as long as the rail
+            always has room to its right, which it always did before (the rail shared the same
+            overlay as the panel drawer); docking it as its own column right at the container's
+            edge would silently strand every flyout past the viewport's right edge with nothing to
+            recover it. The reserved gap gives it exactly that room back without touching
+            ToolFlyout's own positioning logic. */}
+        {!panelsHidden && layoutMode === 'tablet' && (
+          <div ref={rightRailRef} className="h-full shrink-0 relative z-30 pr-12">
+            {toolRailVisible && <ToolRail activeTool={activeTool} onToolChange={setActiveTool} orientation="vertical" />}
+          </div>
+        )}
         {!panelsHidden && layoutMode === 'tablet' && rightOpen && (
-          <div ref={rightSidebarRef} className="absolute inset-y-0 right-0 z-20 h-full liquid-glass-heavy border-l border-hairline shadow-2xl">
-            {toolsSidebar}
+          <div ref={rightSidebarRef} className="absolute inset-y-0 right-12 z-20 w-64 sm:w-72 h-full liquid-glass-heavy border-l border-hairline shadow-2xl">
+            <PanelStack panels={panelStackEntries} />
           </div>
         )}
 
