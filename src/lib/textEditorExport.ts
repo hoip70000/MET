@@ -1,5 +1,13 @@
 import { stripSpellMarks } from './spellCheck';
+import { stripStatusMarks } from './textEditorMarks';
 import type { TextEditorDoc } from './textEditorStore';
+
+/** Strips every editorial annotation — spell-check marks and section status
+ *  marks alike — before any export. Both are editor-only chrome, never
+ *  meant to reach TXT/DOCX/PDF output. */
+function stripEditorialMarks(html: string): string {
+  return stripStatusMarks(stripSpellMarks(html));
+}
 
 export function downloadBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
@@ -19,6 +27,7 @@ export function downloadBlob(blob: Blob, filename: string) {
  *  than silently vanishing (innerText would otherwise just skip them). */
 export function pageToPlainText(pageHtml: string): string {
   const container = document.createElement('div');
+  container.innerHTML = stripEditorialMarks(pageHtml);
   container.innerHTML = stripSpellMarks(pageHtml);
   container.querySelectorAll('[data-hard-break="true"]').forEach((el) => {
     el.replaceWith(document.createTextNode('\f'));
@@ -67,7 +76,7 @@ interface ParsedBlock {
 /** Reads the block-level structure of a page's HTML into paragraph descriptors for DOCX export. */
 function parseBlocks(pageHtml: string): ParsedBlock[] {
   const container = document.createElement('div');
-  container.innerHTML = stripSpellMarks(pageHtml);
+  container.innerHTML = stripEditorialMarks(pageHtml);
   const blocks: ReturnType<typeof parseBlocks> = [];
 
   function runsFromNode(node: Node, bold: boolean, italic: boolean, underline: boolean): { text: string; bold: boolean; italic: boolean; underline: boolean }[] {
@@ -155,7 +164,7 @@ export async function exportDocAsDocx(doc: TextEditorDoc): Promise<Blob> {
 export function printDocAsPdf(doc: TextEditorDoc) {
   const win = window.open('', '_blank');
   if (!win) return;
-  const pagesHtml = doc.pages.map(p => `<div class="te-print-page">${stripSpellMarks(p)}</div>`).join('');
+  const pagesHtml = doc.pages.map(p => `<div class="te-print-page">${stripEditorialMarks(p)}</div>`).join('');
   win.document.write(`<!doctype html><html dir="${doc.dir}"><head><meta charset="utf-8"><title>${doc.title}</title>
     <style>
       @page { size: A4; margin: 20mm; }

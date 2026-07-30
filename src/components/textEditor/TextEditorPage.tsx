@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Plus, X, Bold, Italic, Underline, AlignLeft, AlignCenter, AlignRight,
   List, ListOrdered, Search, Download, FileType, Printer, Send, Heading1, Heading2,
+  Check, Loader2, AlertCircle, Circle, PanelRight, Table as TableIcon,
+  Pencil, Eye,
   Cloud, CloudOff, Loader2, Heading3, Heading4, AlignJustify, IndentIncrease, IndentDecrease,
   Strikethrough, Undo2, Redo2, Languages, ChevronUp, ChevronDown, Minus, Clock,
   Maximize2, Minimize2, Sun, Moon, Columns2, ChevronLeft, ChevronRight,
@@ -10,6 +12,61 @@ import { Button, IconButton } from '../ui';
 import { useTheme } from '../../contexts/ThemeContext';
 import { swal, swalToast, Swal } from '../../lib/swalTheme';
 import { genId } from '../../lib/id';
+import { loadTextEditorDocs, saveTextEditorDocs, defaultDocStatus, type TextEditorDoc, type TextEditorDocStatus } from '../../lib/textEditorStore';
+import { markMisspellings, stripSpellMarks, findSpellIssues } from '../../lib/spellCheck';
+import { exportDocAsTxt, exportDocAsDocx, printDocAsPdf, downloadBlob } from '../../lib/textEditorExport';
+import { SplitScreenPreview } from './SplitScreenPreview';
+import { DocumentLibrary } from './DocumentLibrary';
+import { TableToolbar } from './TableToolbar';
+import { ImageControls } from './ImageControls';
+import {
+  insertTableHtml, findEnclosingTable, findEnclosingCell, addRow, addColumn,
+  deleteRow, deleteColumn, deleteTable, restoreCaretAt, navigateCell,
+  type CaretRestorePoint,
+} from '../../lib/textEditorTables';
+import { markSelectionAs, stripStatusMarks, type MarkStatus } from '../../lib/textEditorMarks';
+import type { Workspace } from '../../types';
+
+/**
+ * Section 0 architecture audit (see plan doc for full detail):
+ * A1 storage — content lives in the live contentEditable DOM, read via
+ *   `pageRefs.current[i].innerHTML`. React `docs` state is intentionally a stale
+ *   snapshot while a page is being typed into, refreshed only at real structural
+ *   transitions (doc switch/add/remove, spellcheck/replace, unmount) via
+ *   `getDocsWithLiveContent()`.
+ * A2 autosave — reads live DOM (`captureActiveDocPages`) and persists via
+ *   `saveTextEditorDocs`, but must NEVER call `setDocs` for the active, mounted
+ *   page's own content: doing so re-feeds a "new" string through
+ *   `dangerouslySetInnerHTML` on the same node, forcibly resetting the live DOM
+ *   subtree and destroying the caret (this was the actual text-vanishing bug).
+ *   This turned out to be necessary but not sufficient: empirically, *any*
+ *   re-render of `TextEditorPage` — even one that never touches `docs` at all
+ *   (confirmed by instrumenting a real browser session) — was enough to clear
+ *   the page's live content, because the contentEditable div was a plain
+ *   inline host element inside the parent's own render function. Every parent
+ *   re-render re-evaluates that JSX and reconciles a "new" element against the
+ *   old one; a bare host div gets no bailout from that, regardless of whether
+ *   its own `dangerouslySetInnerHTML` value actually changed. The fix is
+ *   `EditablePage` below: a `memo`-wrapped component with fully stable props
+ *   (a per-index ref-callback cache, and `handleInput`/`handleSpellClick`
+ *   exposed as `useCallback`-stabilized wrappers around a "latest logic" ref)
+ *   so React can skip re-rendering — and thus skip touching the DOM at all —
+ *   for a page whose actual content hasn't changed, no matter what else in the
+ *   parent re-renders (a save-status indicator, search panel, spellcheck
+ *   count, or any future state).
+ * A3 background — `.te-page` uses literal `bg-white text-black` (theme-proof).
+ *   `.dark`'s `color-scheme: dark` (index.css) is an inherited property that
+ *   still reaches it and is what browser/OS forced-dark heuristics key off, so
+ *   it gets an explicit `color-scheme: light` opt-out.
+ * A4 tables — no mechanism existed before this session.
+ * A5 images — no dedicated insertion code, but contentEditable natively accepts
+ *   pasted/dropped images (plain `<img>` tags in the page HTML, not tracked in
+ *   `TextEditorDoc` separately).
+ * A6 file management — was a flat, unversioned `TextEditorDoc[]`, no per-doc
+ *   metadata or sidebar UI before this session.
+ * A7 split preview — did not exist; `TextEditorPage` had no reference to
+ *   workspaces/chapters before this session.
+ */
 import { loadTextEditorDocs, saveTextEditorDocs, type TextEditorDoc } from '../../lib/textEditorStore';
 import { markMisspellings, markMisspellingsLive, stripSpellMarks, findAllSpellIssues } from '../../lib/spellCheck';
 import { exportDocAsTxt, exportDocAsDocx, printDocAsPdf, downloadBlob } from '../../lib/textEditorExport';
@@ -32,9 +89,53 @@ const MIN_SPLIT_RATIO = 0.2;
 const MAX_SPLIT_RATIO = 0.8;
 
 function newDoc(title = 'Untitled'): TextEditorDoc {
-  return { id: genId('tedoc'), title, dir: 'ltr', pages: [''] };
+  return { id: genId('tedoc'), title, dir: 'ltr', pages: [''], updatedAt: Date.now(), status: defaultDocStatus() };
 }
 
+interface EditablePageProps {
+  initialHtml: string;
+  pageRef: (el: HTMLDivElement | null) => void;
+  onInput: () => void;
+  onClick: (e: React.MouseEvent) => void;
+  onKeyDown: (e: React.KeyboardEvent) => void;
+  onContextMenu: (e: React.MouseEvent) => void;
+}
+
+/** Isolated behind `memo` deliberately — see the A2 note in the audit comment
+ *  above. Must receive only stable/primitive props (a string, not a fresh
+ *  `{__html}` wrapper object; stable callback references) or the memoization
+ *  is defeated and every parent re-render still reaches into this DOM. */
+const EditablePage = memo(function EditablePage({ initialHtml, pageRef, onInput, onClick, onKeyDown, onContextMenu }: EditablePageProps) {
+  return (
+    <div className="shrink-0 overflow-hidden rounded-sm shadow-2xl" style={{ width: PAGE_WIDTH }}>
+      <div
+        ref={pageRef}
+        contentEditable
+        suppressContentEditableWarning
+        spellCheck
+        dangerouslySetInnerHTML={{ __html: initialHtml }}
+        onInput={onInput}
+        onClick={onClick}
+        onKeyDown={onKeyDown}
+        onContextMenu={onContextMenu}
+        className="te-page bg-white text-black px-16 py-16 text-[15px] leading-relaxed outline-none overflow-hidden"
+        style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT, minHeight: PAGE_HEIGHT, colorScheme: 'light' }}
+      />
+    </div>
+  );
+});
+
+interface TextEditorPageProps {
+  onSendToTyper: (script: string) => void;
+  /** Whether a Studio chapter is currently open — Send to TypeR switches the top-level view to
+   *  Library either way, but only actually lands on the Studio (where the script is waiting) if
+   *  one is; the toast wording reflects which case this is instead of always claiming success. */
+  hasActiveChapter: boolean;
+  workspaces: Workspace[];
+}
+
+export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: TextEditorPageProps) {
+  const [splitScreenOpen, setSplitScreenOpen] = useState(false);
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   const kb = bytes / 1024;
@@ -76,6 +177,21 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
   const [matchCount, setMatchCount] = useState(0);
   const [currentMatchIndex, setCurrentMatchIndex] = useState(0);
   const [spellReport, setSpellReport] = useState<number | null>(null);
+  const [saveStatus, setSaveStatus] = useState<'saved' | 'unsaved' | 'saving' | 'error'>('saved');
+  const [activeTable, setActiveTable] = useState<HTMLTableElement | null>(null);
+  const [tableFullySelected, setTableFullySelected] = useState(false);
+  const [tableContextMenuPos, setTableContextMenuPos] = useState<{ x: number; y: number } | null>(null);
+  const activeTableCellRef = useRef<HTMLTableCellElement | null>(null);
+  /** Increments across the session so a deleted-then-recreated "Document N"
+   *  never collides with an existing title, unlike a plain docs.length+1. */
+  const docCounterRef = useRef(0);
+  const tableContextMenuRef = useRef<HTMLDivElement | null>(null);
+  const [selectedImage, setSelectedImage] = useState<HTMLImageElement | null>(null);
+  const [imageContextMenuPos, setImageContextMenuPos] = useState<{ x: number; y: number } | null>(null);
+  const imageContextMenuRef = useRef<HTMLDivElement | null>(null);
+  const [markMenuPos, setMarkMenuPos] = useState<{ x: number; y: number } | null>(null);
+  const markMenuRef = useRef<HTMLDivElement | null>(null);
+  const markSelectionRef = useRef<{ root: HTMLElement; range: Range } | null>(null);
   const [saveState, setSaveState] = useState<'saved' | 'unsaved' | 'saving'>('saved');
   const [sendToTyperOpen, setSendToTyperOpen] = useState(false);
 
@@ -166,6 +282,48 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
   const pageRefs = useRef<(HTMLDivElement | null)[]>([]);
   const dirtyRef = useRef(false);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Mirrors `docs` state so the live content can be read/merged without waiting
+   *  for (or forcing) a re-render — see `getDocsWithLiveContent`. */
+  const docsRef = useRef<TextEditorDoc[]>([]);
+  /** Mirrors `activeDocId` so helpers callable from a once-created closure
+   *  (e.g. the unmount cleanup below) never read a stale id. */
+  const activeDocIdRef = useRef<string | null>(null);
+  /** Stable per-page-index ref callbacks — reusing the same function reference
+   *  across renders is required for `EditablePage`'s `memo` to bail out (a
+   *  fresh inline arrow function every render would look like a changed prop). */
+  const pageRefCallbacksRef = useRef<Map<number, (el: HTMLDivElement | null) => void>>(new Map());
+  /** "Latest logic" refs backing the stable `handleInput`/`handleSpellClick`
+   *  wrappers below — lets those exposed callbacks keep one identity forever
+   *  (required for `EditablePage`'s `memo` to bail out) while always running
+   *  the current render's actual logic, never a stale closure. */
+  const runInputLogicRef = useRef<() => void>(() => {});
+  const runPageClickLogicRef = useRef<(e: React.MouseEvent) => void>(() => {});
+  const runKeyDownLogicRef = useRef<(e: React.KeyboardEvent) => void>(() => {});
+  const runContextMenuLogicRef = useRef<(e: React.MouseEvent) => void>(() => {});
+
+  useEffect(() => { activeDocIdRef.current = activeDocId; }, [activeDocId]);
+
+  function getPageRefCallback(i: number): (el: HTMLDivElement | null) => void {
+    const cache = pageRefCallbacksRef.current;
+    let cb = cache.get(i);
+    if (!cb) {
+      cb = (el: HTMLDivElement | null) => { pageRefs.current[i] = el; };
+      cache.set(i, cb);
+    }
+    return cb;
+  }
+
+  const handleInput = useCallback(() => { runInputLogicRef.current(); }, []);
+  const handlePageClick = useCallback((e: React.MouseEvent) => { runPageClickLogicRef.current(e); }, []);
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => { runKeyDownLogicRef.current(e); }, []);
+  const handleContextMenu = useCallback((e: React.MouseEvent) => { runContextMenuLogicRef.current(e); }, []);
+
+  /** Replaces every direct `setDocs(...)` call site so `docsRef` never drifts
+   *  from `docs` state. */
+  function updateDocs(next: TextEditorDoc[]) {
+    docsRef.current = next;
+    setDocs(next);
+  }
   // Always-current mirrors of `docs`/`activeDocId`, read from async callbacks (the debounced
   // autosave timeout, the unmount flush) instead of the closed-over state values, which go stale
   // the moment a callback outlives the render that created it.
@@ -184,13 +342,26 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
   const pageSeedRef = useRef<string[]>([]);
 
   useEffect(() => {
+    // StrictMode double-invokes this effect in dev. Without the `cancelled`
+    // guard, both invocations would independently call `newDoc()` (a fresh
+    // random id each time) whenever no doc is saved yet, and whichever
+    // resolves last would silently replace the other — including any content
+    // already typed into it, since the page tree's key is keyed off the doc id.
+    let cancelled = false;
     loadTextEditorDocs().then((saved) => {
+      if (cancelled) return;
       const initial = saved && saved.length > 0 ? saved : [newDoc()];
+      docsRef.current = initial;
+      for (const d of initial) {
+        const match = /^Document (\d+)$/.exec(d.title);
+        if (match) docCounterRef.current = Math.max(docCounterRef.current, parseInt(match[1], 10));
+      }
       pageSeedRef.current = initial[0].pages;
       setDocs(initial);
       setActiveDocId(initial[0].id);
       setLoaded(true);
     });
+    return () => { cancelled = true; };
   }, []);
 
   // Custom fonts are a page-global FontFace registration (document.fonts), but Studio's own
@@ -210,19 +381,34 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     return pageRefs.current.filter((el): el is HTMLDivElement => !!el).map(el => el.innerHTML);
   }
 
+  /** `docsRef.current` with the active doc's pages replaced by a fresh live-DOM
+   *  read — the single source of truth for "docs, but honest about what's
+   *  currently on screen." Reads only refs, so it's safe to call from a stale
+   *  closure (e.g. the unmount cleanup) regardless of when it fires. */
+  function getDocsWithLiveContent(): TextEditorDoc[] {
+    const activeId = activeDocIdRef.current;
+    if (!activeId) return docsRef.current;
+    const pages = captureActiveDocPages();
+    if (pages.length === 0) return docsRef.current;
+    return docsRef.current.map(d => d.id === activeId ? { ...d, pages } : d);
+  }
+
   function commitActiveDocPages(pages: string[]) {
     if (!activeDocId) return;
+    updateDocs(docsRef.current.map(d => d.id === activeDocId ? { ...d, pages, updatedAt: Date.now() } : d));
     pageSeedRef.current = pages;
     setDocs(prev => prev.map(d => d.id === activeDocId ? { ...d, pages } : d));
   }
 
   function scheduleAutosave() {
     dirtyRef.current = true;
+    setSaveStatus('unsaved');
     setSaveState('unsaved');
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
     saveTimeoutRef.current = setTimeout(() => {
       if (!dirtyRef.current) return;
       dirtyRef.current = false;
+      void flushSave();
       setSaveState('saving');
       // Deliberately reads live DOM + the always-current refs, not the `docs`/`activeDocId`
       // closed over at schedule-time, and deliberately never writes `pageSeedRef` — see its own
@@ -247,8 +433,35 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     }, AUTOSAVE_MS);
   }
 
+  /** Persists the live content and updates `docsRef` — deliberately never calls
+   *  `setDocs`/re-renders the active page, since that would force
+   *  `dangerouslySetInnerHTML` to re-apply on the still-mounted, still-focused
+   *  contentEditable node and destroy the caret (see Section 0 audit above). */
+  async function flushSave(): Promise<void> {
+    const activeId = activeDocIdRef.current;
+    const nextDocs = getDocsWithLiveContent().map(d => d.id === activeId ? { ...d, updatedAt: Date.now() } : d);
+    docsRef.current = nextDocs;
+    setSaveStatus('saving');
+    try {
+      await saveTextEditorDocs(nextDocs);
+      const readBack = await loadTextEditorDocs();
+      const sentLen = nextDocs.reduce((n, d) => n + d.pages.join('').length, 0);
+      const gotLen = (readBack ?? []).reduce((n, d) => n + d.pages.join('').length, 0);
+      if (sentLen !== gotLen) {
+        throw new Error('SAVE REGRESSION: saved content does not match source');
+      }
+      setSaveStatus('saved');
+    } catch (err) {
+      console.error(err);
+      setSaveStatus('error');
+      swalToast({ icon: 'error', title: err instanceof Error ? err.message : 'Save failed' });
+    }
+  }
+
   useEffect(() => () => {
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+    if (dirtyRef.current) {
+      saveTextEditorDocs(getDocsWithLiveContent()).catch(console.error);
     if (spellTimeoutRef.current) clearTimeout(spellTimeoutRef.current);
     const docId = activeDocIdRef.current;
     if (dirtyRef.current && docId) {
@@ -338,6 +551,11 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     const currentCount = activeDoc?.pages.length ?? els.length;
 
     if (neededCount !== currentCount) {
+      const docId = activeDocIdRef.current;
+      // Only ever grows/truncates the pages array *length* — every untouched
+      // page's string reference is preserved as-is, so this never disturbs a
+      // live-edited page's dangerouslySetInnerHTML value (see Section 0 audit).
+      updateDocs(docsRef.current.map((d) => {
       const docId = activeDocId;
       // Rebuild from each existing page's *current live DOM content*, not the possibly-stale
       // `d.pages` React state, purely for persistence bookkeeping — page content itself no longer
@@ -404,11 +622,91 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeDoc?.pages.length]);
 
-  function handleInput() {
+  // The active table lives as a raw DOM node inside dangerouslySetInnerHTML
+  // content, not a React-managed element — its "selected" outline is applied
+  // imperatively rather than via a class from a stylesheet.
+  useEffect(() => {
+    if (!activeTable) return;
+    if (tableFullySelected) {
+      activeTable.style.outline = '2px solid #007AFF';
+      activeTable.style.outlineOffset = '1px';
+    } else {
+      activeTable.style.outline = '';
+      activeTable.style.outlineOffset = '';
+    }
+    return () => {
+      activeTable.style.outline = '';
+      activeTable.style.outlineOffset = '';
+    };
+  }, [activeTable, tableFullySelected]);
+
+  useEffect(() => {
+    if (!tableContextMenuPos) return;
+    function dismiss(e: PointerEvent) {
+      if (tableContextMenuRef.current?.contains(e.target as Node)) return;
+      setTableContextMenuPos(null);
+    }
+    function onKey(e: KeyboardEvent) { if (e.key === 'Escape') setTableContextMenuPos(null); }
+    window.addEventListener('pointerdown', dismiss);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('pointerdown', dismiss);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [tableContextMenuPos]);
+
+  useEffect(() => {
+    if (!imageContextMenuPos) return;
+    function dismiss(e: PointerEvent) {
+      if (imageContextMenuRef.current?.contains(e.target as Node)) return;
+      setImageContextMenuPos(null);
+    }
+    function onKey(e: KeyboardEvent) { if (e.key === 'Escape') setImageContextMenuPos(null); }
+    window.addEventListener('pointerdown', dismiss);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('pointerdown', dismiss);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [imageContextMenuPos]);
+
+  useEffect(() => {
+    if (!markMenuPos) return;
+    function dismiss(e: PointerEvent) {
+      if (markMenuRef.current?.contains(e.target as Node)) return;
+      setMarkMenuPos(null);
+    }
+    function onKey(e: KeyboardEvent) { if (e.key === 'Escape') setMarkMenuPos(null); }
+    window.addEventListener('pointerdown', dismiss);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('pointerdown', dismiss);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [markMenuPos]);
+
+  // Deselecting an image on outside click is already handled inside
+  // runPageClickLogic (a click anywhere in the page that isn't the image
+  // itself clears selectedImage) — this covers clicking outside the page
+  // entirely (e.g. onto chrome/toolbars), which that handler never sees.
+  useEffect(() => {
+    if (!selectedImage) return;
+    function onPointerDown(e: PointerEvent) {
+      const target = e.target as Node;
+      if (target === selectedImage || (target instanceof Node && selectedImage.contains(target))) return;
+      const withinPage = pageRefs.current.some(el => el?.contains(target));
+      if (!withinPage) setSelectedImage(null);
+    }
+    window.addEventListener('pointerdown', onPointerDown);
+    return () => window.removeEventListener('pointerdown', onPointerDown);
+  }, [selectedImage]);
+
+  function runInputLogic() {
     scheduleAutosave();
     reflow();
     scheduleContentAnalysis();
   }
+  runInputLogicRef.current = runInputLogic;
 
   function exec(command: string, value?: string) {
     document.execCommand(command, false, value);
@@ -939,6 +1237,11 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
   const [imageMenu, setImageMenu] = useState<{ img: HTMLImageElement; x: number; y: number } | null>(null);
 
   function addDoc() {
+    const based = getDocsWithLiveContent();
+    docCounterRef.current += 1;
+    const doc = newDoc(`Document ${docCounterRef.current}`);
+    const next = [...based, doc];
+    updateDocs(next);
     const doc = newDoc(`Document ${docs.length + 1}`);
     const next = [...docs, doc];
     pageSeedRef.current = doc.pages;
@@ -953,6 +1256,11 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
    *  than Word's own "once per session" unsaved-changes prompt, so this flushes the outgoing
    *  doc's live content first and only surfaces anything if that flush itself fails. */
   function closeDoc(id: string) {
+    const based = getDocsWithLiveContent();
+    if (based.length <= 1) return;
+    const next = based.filter(d => d.id !== id);
+    updateDocs(next);
+    if (activeDocId === id) setActiveDocId(next[0].id);
     if (docs.length <= 1) return;
     const sourceDocs = id === activeDocId
       ? docs.map(d => d.id === id ? { ...d, pages: captureActiveDocPages() } : d)
@@ -1013,10 +1321,35 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     saveTextEditorDocs(next).catch(console.error);
   }
 
+  function renameDoc(id: string, title: string) {
+    const next = docsRef.current.map(d => d.id === id ? { ...d, title, updatedAt: Date.now() } : d);
+    updateDocs(next);
+    saveTextEditorDocs(next).catch(console.error);
+  }
+
+  function duplicateDoc(id: string) {
+    const based = getDocsWithLiveContent();
+    const source = based.find(d => d.id === id);
+    if (!source) return;
+    const copy: TextEditorDoc = { ...structuredClone(source), id: genId('tedoc'), title: `${source.title} copy`, updatedAt: Date.now() };
+    const next = [...based, copy];
+    updateDocs(next);
+    saveTextEditorDocs(next).catch(console.error);
+  }
+
+  function toggleDocStatus(id: string, key: keyof TextEditorDocStatus) {
+    const next = docsRef.current.map(d => d.id === id ? { ...d, status: { ...d.status, [key]: !d.status[key] } } : d);
+    updateDocs(next);
+    saveTextEditorDocs(next).catch(console.error);
+  }
+
   function switchDoc(id: string) {
-    if (dirtyRef.current && activeDocId) {
-      const pages = captureActiveDocPages();
-      setDocs(prev => prev.map(d => d.id === activeDocId ? { ...d, pages } : d));
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = null;
+    }
+    if (dirtyRef.current) {
+      updateDocs(getDocsWithLiveContent());
       dirtyRef.current = false;
     }
     const target = docs.find(d => d.id === id);
@@ -1064,6 +1397,7 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     setSpellReport(null);
   }
 
+  function runPageClickLogic(e: React.MouseEvent) {
   const [selectedImage, setSelectedImage] = useState<HTMLImageElement | null>(null);
 
   function handlePageClick(e: React.MouseEvent) {
@@ -1073,6 +1407,269 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
       scheduleAutosave();
       return;
     }
+    if (target.tagName === 'IMG') {
+      setSelectedImage(target as HTMLImageElement);
+      setActiveTable(null);
+      setTableFullySelected(false);
+      return;
+    }
+    if (selectedImage) setSelectedImage(null);
+    const table = findEnclosingTable(target);
+    if (table) {
+      setActiveTable(table);
+      activeTableCellRef.current = findEnclosingCell(target);
+      setTableFullySelected(false);
+    } else if (activeTable) {
+      setActiveTable(null);
+      setTableFullySelected(false);
+    }
+  }
+  runPageClickLogicRef.current = runPageClickLogic;
+
+  function deleteSelectedImage() {
+    if (!selectedImage) return;
+    const parent = selectedImage.parentNode;
+    const nextSibling = selectedImage.nextSibling;
+    selectedImage.remove();
+    setSelectedImage(null);
+    if (parent) restoreCaretAt({ parent, nextSibling });
+    scheduleAutosave();
+    reflow();
+  }
+
+  function runKeyDownLogic(e: React.KeyboardEvent) {
+    if (selectedImage) {
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault();
+        deleteSelectedImage();
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setSelectedImage(null);
+        return;
+      }
+    }
+    if (!activeTable) return;
+    if (e.key === 'Tab') {
+      const cell = findEnclosingCell(window.getSelection()?.anchorNode ?? null);
+      if (!cell) return;
+      e.preventDefault();
+      navigateCell(activeTable, cell, e.shiftKey ? 'prev' : 'next');
+      scheduleAutosave();
+      reflow();
+      return;
+    }
+    if ((e.key === 'Delete' || e.key === 'Backspace') && tableFullySelected) {
+      e.preventDefault();
+      const restore = deleteTable(activeTable);
+      setActiveTable(null);
+      setTableFullySelected(false);
+      if (restore) restoreCaretAt(restore);
+      scheduleAutosave();
+      reflow();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+      const cell = findEnclosingCell(window.getSelection()?.anchorNode ?? null);
+      if (cell) {
+        e.preventDefault();
+        setTableFullySelected(true);
+      }
+    }
+  }
+  runKeyDownLogicRef.current = runKeyDownLogic;
+
+  function runContextMenuLogic(e: React.MouseEvent) {
+    const target = e.target as HTMLElement;
+    if (target.tagName === 'IMG') {
+      e.preventDefault();
+      setSelectedImage(target as HTMLImageElement);
+      setImageContextMenuPos({ x: e.clientX, y: e.clientY });
+      return;
+    }
+    const table = findEnclosingTable(target);
+    if (table) {
+      e.preventDefault();
+      setActiveTable(table);
+      activeTableCellRef.current = findEnclosingCell(target);
+      setTableContextMenuPos({ x: e.clientX, y: e.clientY });
+      return;
+    }
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed && sel.rangeCount > 0) {
+      const range = sel.getRangeAt(0);
+      const root = pageRefs.current.find((el): el is HTMLDivElement => !!el && el.contains(range.commonAncestorContainer));
+      if (root) {
+        e.preventDefault();
+        markSelectionRef.current = { root, range: range.cloneRange() };
+        setMarkMenuPos({ x: e.clientX, y: e.clientY });
+      }
+    }
+  }
+  runContextMenuLogicRef.current = runContextMenuLogic;
+
+  function applyMark(status: MarkStatus) {
+    const saved = markSelectionRef.current;
+    setMarkMenuPos(null);
+    if (!saved) return;
+    const count = markSelectionAs(saved.root, saved.range, status);
+    if (count > 0) scheduleAutosave();
+  }
+
+  function alignSelectedImage(align: 'left' | 'center' | 'right') {
+    if (!selectedImage) return;
+    if (align === 'left') {
+      selectedImage.style.cssFloat = 'left';
+      selectedImage.style.display = 'inline-block';
+      selectedImage.style.margin = '0 8px 8px 0';
+    } else if (align === 'right') {
+      selectedImage.style.cssFloat = 'right';
+      selectedImage.style.display = 'inline-block';
+      selectedImage.style.margin = '0 0 8px 8px';
+    } else {
+      selectedImage.style.cssFloat = 'none';
+      selectedImage.style.display = 'block';
+      selectedImage.style.margin = '0 auto';
+    }
+    scheduleAutosave();
+    reflow();
+  }
+
+  async function copySelectedImage() {
+    if (!selectedImage) return;
+    try {
+      const response = await fetch(selectedImage.src);
+      const blob = await response.blob();
+      await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+      swalToast({ icon: 'success', title: 'Image copied' });
+    } catch (err) {
+      swalToast({ icon: 'error', title: err instanceof Error ? err.message : 'Could not copy image' });
+    }
+  }
+
+  function tableRowActionTarget(): { row: HTMLTableRowElement } | null {
+    if (!activeTable) return null;
+    const cell = activeTableCellRef.current;
+    const row = (cell?.parentElement as HTMLTableRowElement | null) ?? activeTable.querySelector('tr');
+    return row ? { row } : null;
+  }
+
+  function tableColIndex(): number {
+    const cell = activeTableCellRef.current;
+    if (!cell?.parentElement) return 0;
+    return Array.from(cell.parentElement.children).indexOf(cell);
+  }
+
+  function applyTableRestore(restore: CaretRestorePoint | null) {
+    if (restore) {
+      setActiveTable(null);
+      setTableFullySelected(false);
+      restoreCaretAt(restore);
+    }
+    scheduleAutosave();
+    reflow();
+  }
+
+  function handleAddRowAbove() {
+    const target = tableRowActionTarget();
+    if (!activeTable || !target) return;
+    addRow(activeTable, target.row, 'above');
+    scheduleAutosave();
+    reflow();
+  }
+
+  function handleAddRowBelow() {
+    const target = tableRowActionTarget();
+    if (!activeTable || !target) return;
+    addRow(activeTable, target.row, 'below');
+    scheduleAutosave();
+    reflow();
+  }
+
+  function handleAddColLeft() {
+    if (!activeTable) return;
+    addColumn(activeTable, tableColIndex(), 'left');
+    scheduleAutosave();
+    reflow();
+  }
+
+  function handleAddColRight() {
+    if (!activeTable) return;
+    addColumn(activeTable, tableColIndex(), 'right');
+    scheduleAutosave();
+    reflow();
+  }
+
+  function handleDeleteRowAction() {
+    const target = tableRowActionTarget();
+    if (!target) return;
+    applyTableRestore(deleteRow(target.row));
+  }
+
+  function handleDeleteColAction() {
+    if (!activeTable) return;
+    applyTableRestore(deleteColumn(activeTable, tableColIndex()));
+  }
+
+  function handleDeleteTableAction() {
+    if (!activeTable) return;
+    applyTableRestore(deleteTable(activeTable));
+  }
+
+  async function handleInsertTable() {
+    // By the time this handler runs, document.activeElement is already the
+    // toolbar button that was clicked (not the contentEditable) — the caret's
+    // Range is still valid though, so use it (rather than activeElement) to
+    // find which page to restore focus/selection into after the swal dialog
+    // (which steals focus) closes.
+    const sel = window.getSelection();
+    const savedRange = sel && sel.rangeCount > 0 ? sel.getRangeAt(0).cloneRange() : null;
+    const targetPageEl = savedRange
+      ? pageRefs.current.find((el): el is HTMLDivElement => !!el && el.contains(savedRange.commonAncestorContainer))
+      : null;
+
+    const result = await swal({
+      title: 'Insert Table',
+      html: `<div style="display:flex;gap:8px;justify-content:center;">
+        <input id="te-table-rows" type="number" min="1" max="20" value="3" placeholder="Rows" style="width:80px;padding:6px;border:1px solid #ccc;border-radius:6px;" />
+        <input id="te-table-cols" type="number" min="1" max="20" value="3" placeholder="Cols" style="width:80px;padding:6px;border:1px solid #ccc;border-radius:6px;" />
+      </div>`,
+      showCancelButton: true,
+      confirmButtonText: 'Insert',
+      preConfirm: () => {
+        const rowsEl = document.getElementById('te-table-rows') as HTMLInputElement | null;
+        const colsEl = document.getElementById('te-table-cols') as HTMLInputElement | null;
+        const rows = Math.max(1, Math.min(20, parseInt(rowsEl?.value ?? '3', 10) || 3));
+        const cols = Math.max(1, Math.min(20, parseInt(colsEl?.value ?? '3', 10) || 3));
+        return { rows, cols };
+      },
+    });
+    if (!result.isConfirmed || !result.value) return;
+    const { rows, cols } = result.value as { rows: number; cols: number };
+
+    // SweetAlert2's own dialog teardown (and any focus trap it holds) can still
+    // be in progress for a tick after the confirm promise resolves — refocusing
+    // the page immediately risks losing to it. Give it a beat to finish first.
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    const focusTarget = targetPageEl ?? pageRefs.current.find((el): el is HTMLDivElement => !!el);
+    if (focusTarget) {
+      focusTarget.focus();
+      const restoredSel = window.getSelection();
+      restoredSel?.removeAllRanges();
+      if (savedRange) {
+        restoredSel?.addRange(savedRange);
+      } else {
+        const endRange = document.createRange();
+        endRange.selectNodeContents(focusTarget);
+        endRange.collapse(false);
+        restoredSel?.addRange(endRange);
+      }
+    }
+    document.execCommand('insertHTML', false, insertTableHtml(rows, cols));
+    scheduleAutosave();
+    reflow();
     if (target instanceof HTMLImageElement) {
       setSelectedImage(target);
       return;
@@ -1488,7 +2085,7 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
       : pages.slice(result.pageRange.from - 1, result.pageRange.to);
     const text = selectedPages.map((html) => {
       const container = document.createElement('div');
-      container.innerHTML = stripSpellMarks(html);
+      container.innerHTML = stripStatusMarks(stripSpellMarks(html));
       return container.innerText;
     }).join('\n');
     setSendToTyperOpen(false);
@@ -1512,6 +2109,7 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     { icon: AlignLeft, label: 'Align left', run: () => exec('justifyLeft') },
     { icon: AlignCenter, label: 'Align center', run: () => exec('justifyCenter') },
     { icon: AlignRight, label: 'Align right', run: () => exec('justifyRight') },
+    { icon: TableIcon, label: 'Insert Table', run: () => void handleInsertTable() },
     { icon: AlignJustify, label: 'Justify', run: () => exec('justifyFull') },
     { icon: IndentIncrease, label: 'Increase indent', run: () => exec('indent') },
     { icon: IndentDecrease, label: 'Decrease indent', run: () => exec('outdent') },
@@ -1576,7 +2174,27 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     return <div className="flex-1 flex items-center justify-center text-ink-faint text-sm">Loading…</div>;
   }
 
+  const saveStatusDisplay: Record<typeof saveStatus, { icon: typeof Check; label: string; className: string }> = {
+    saved: { icon: Check, label: 'Saved', className: 'text-ink-faint' },
+    unsaved: { icon: Circle, label: 'Unsaved changes', className: 'text-warning' },
+    saving: { icon: Loader2, label: 'Saving…', className: 'text-accent' },
+    error: { icon: AlertCircle, label: 'Save failed', className: 'text-danger' },
+  };
+  const { icon: SaveStatusIcon, label: saveStatusLabel, className: saveStatusClassName } = saveStatusDisplay[saveStatus];
+
   return (
+    <div className="flex h-full min-h-0">
+      <DocumentLibrary
+        docs={docs}
+        activeDocId={activeDocId}
+        onOpen={switchDoc}
+        onNew={addDoc}
+        onRename={renameDoc}
+        onDuplicate={duplicateDoc}
+        onDelete={closeDoc}
+        onToggleStatus={toggleDocStatus}
+      />
+      <div className="flex flex-col flex-1 min-w-0 h-full min-h-0">
     <div ref={rootRef} className="flex flex-col h-full min-h-0">
       <TextEditorMenuBar actions={menuActions} />
 
@@ -1608,6 +2226,43 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
           <Plus size={14} />
         </IconButton>
         <div className="flex-1" />
+        {activeDoc && (
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              aria-label="Toggle In Progress"
+              title="In Progress"
+              onClick={() => toggleDocStatus(activeDoc.id, 'inProgress')}
+              className={`w-4 h-4 rounded-full flex items-center justify-center ${activeDoc.status.inProgress ? 'bg-[#0A84FF] text-white' : 'bg-ink/10 text-ink-faint'}`}
+            >
+              <Pencil size={9} />
+            </button>
+            <button
+              aria-label="Toggle Finished"
+              title="Finished"
+              onClick={() => toggleDocStatus(activeDoc.id, 'finished')}
+              className={`w-4 h-4 rounded-full flex items-center justify-center ${activeDoc.status.finished ? 'bg-[#30D158] text-white' : 'bg-ink/10 text-ink-faint'}`}
+            >
+              <Check size={9} />
+            </button>
+            <button
+              aria-label="Toggle Reviewed"
+              title="Reviewed"
+              onClick={() => toggleDocStatus(activeDoc.id, 'reviewed')}
+              className={`w-4 h-4 rounded-full flex items-center justify-center ${activeDoc.status.reviewed ? 'bg-[#BF5AF2] text-white' : 'bg-ink/10 text-ink-faint'}`}
+            >
+              <Eye size={9} />
+            </button>
+          </div>
+        )}
+        <span className={`flex items-center gap-1 text-[11px] shrink-0 px-1 ${saveStatusClassName}`}>
+          <SaveStatusIcon size={12} className={saveStatus === 'saving' ? 'animate-spin' : ''} />
+          {saveStatusLabel}
+        </span>
+        <IconButton size="sm" aria-label="Find & replace" onClick={() => setSearchOpen(v => !v)} className={`!bg-transparent shrink-0 ${searchOpen ? '!text-accent' : ''}`}>
+          <Search size={14} />
+        </IconButton>
+        <IconButton size="sm" aria-label="Toggle split screen" onClick={() => setSplitScreenOpen(v => !v)} className={`!bg-transparent shrink-0 ${splitScreenOpen ? '!text-accent' : ''}`}>
+          <PanelRight size={14} />
         <span className="flex items-center gap-1 text-[11px] text-ink-faint shrink-0 px-1" title="Autosave status">
           {saveState === 'saving' ? (
             <><Loader2 size={12} className="animate-spin" /> Saving…</>
@@ -1755,6 +2410,114 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
         </div>
       )}
 
+      {/* Pages */}
+      <div className="flex-1 min-h-0 overflow-auto bg-[#e9e9ec] dark:bg-[#2a2a2a] flex flex-col items-center gap-6 py-8">
+        {activeDoc && (
+          <div key={`${activeDoc.id}-${renderKey}`} className="flex flex-col items-center gap-6" dir={activeDoc.dir}>
+            {activeDoc.pages.map((html, i) => (
+              <EditablePage
+                key={i}
+                initialHtml={html}
+                pageRef={getPageRefCallback(i)}
+                onInput={handleInput}
+                onClick={handlePageClick}
+                onKeyDown={handleKeyDown}
+                onContextMenu={handleContextMenu}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+      </div>
+      {splitScreenOpen && <SplitScreenPreview workspaces={workspaces} onClose={() => setSplitScreenOpen(false)} />}
+      {activeTable && (
+        <TableToolbar
+          table={activeTable}
+          fullySelected={tableFullySelected}
+          onToggleFullySelected={() => {
+            setTableFullySelected(v => !v);
+            // Belt-and-suspenders alongside the handle button's own
+            // onMouseDown preventDefault: force focus/keydown routing back
+            // onto the contentEditable regardless of any focus quirks, so
+            // the very next Delete/Backspace reliably reaches runKeyDownLogic.
+            const table = activeTable;
+            const containingPage = pageRefs.current.find((el): el is HTMLDivElement => !!el && !!table && el.contains(table));
+            containingPage?.focus();
+          }}
+          onAddRowAbove={handleAddRowAbove}
+          onAddRowBelow={handleAddRowBelow}
+          onAddColLeft={handleAddColLeft}
+          onAddColRight={handleAddColRight}
+          onDeleteRow={handleDeleteRowAction}
+          onDeleteCol={handleDeleteColAction}
+          onDeleteTable={handleDeleteTableAction}
+        />
+      )}
+      {tableContextMenuPos && (
+        <div
+          ref={tableContextMenuRef}
+          className="fixed z-50 bg-elevated border border-hairline rounded-md shadow-panel py-1"
+          style={{ top: tableContextMenuPos.y, left: tableContextMenuPos.x }}
+        >
+          <button
+            className="block w-full text-left text-[12px] px-3 py-1.5 hover:bg-ink/10 text-danger whitespace-nowrap"
+            onClick={() => { handleDeleteTableAction(); setTableContextMenuPos(null); }}
+          >
+            Delete Table
+          </button>
+        </div>
+      )}
+      {selectedImage && (
+        <ImageControls
+          image={selectedImage}
+          onDelete={deleteSelectedImage}
+          onResizeCommit={() => { scheduleAutosave(); reflow(); }}
+        />
+      )}
+      {imageContextMenuPos && (
+        <div
+          ref={imageContextMenuRef}
+          onPointerDown={(e) => e.stopPropagation()}
+          className="fixed z-50 bg-elevated border border-hairline rounded-md shadow-panel py-1"
+          style={{ top: imageContextMenuPos.y, left: imageContextMenuPos.x }}
+        >
+          <button className="block w-full text-left text-[12px] px-3 py-1.5 hover:bg-ink/10 text-danger whitespace-nowrap" onClick={() => { deleteSelectedImage(); setImageContextMenuPos(null); }}>
+            Delete Image
+          </button>
+          <button className="block w-full text-left text-[12px] px-3 py-1.5 hover:bg-ink/10 text-ink whitespace-nowrap" onClick={() => { void copySelectedImage(); setImageContextMenuPos(null); }}>
+            Copy Image
+          </button>
+          <div className="h-px bg-hairline my-1" />
+          <button className="block w-full text-left text-[12px] px-3 py-1.5 hover:bg-ink/10 text-ink whitespace-nowrap" onClick={() => { alignSelectedImage('left'); setImageContextMenuPos(null); }}>
+            Align Left
+          </button>
+          <button className="block w-full text-left text-[12px] px-3 py-1.5 hover:bg-ink/10 text-ink whitespace-nowrap" onClick={() => { alignSelectedImage('center'); setImageContextMenuPos(null); }}>
+            Align Center
+          </button>
+          <button className="block w-full text-left text-[12px] px-3 py-1.5 hover:bg-ink/10 text-ink whitespace-nowrap" onClick={() => { alignSelectedImage('right'); setImageContextMenuPos(null); }}>
+            Align Right
+          </button>
+        </div>
+      )}
+      {markMenuPos && (
+        <div
+          ref={markMenuRef}
+          onPointerDown={(e) => e.stopPropagation()}
+          className="fixed z-50 bg-elevated border border-hairline rounded-md shadow-panel py-1"
+          style={{ top: markMenuPos.y, left: markMenuPos.x }}
+        >
+          <div className="px-3 py-1 text-[10px] text-ink-faint uppercase tracking-wide whitespace-nowrap">Mark as…</div>
+          <button className="block w-full text-left text-[12px] px-3 py-1.5 hover:bg-ink/10 text-ink whitespace-nowrap" onClick={() => applyMark('inProgress')}>
+            🔵 In Progress
+          </button>
+          <button className="block w-full text-left text-[12px] px-3 py-1.5 hover:bg-ink/10 text-ink whitespace-nowrap" onClick={() => applyMark('finished')}>
+            🟢 Finished
+          </button>
+          <button className="block w-full text-left text-[12px] px-3 py-1.5 hover:bg-ink/10 text-ink whitespace-nowrap" onClick={() => applyMark('reviewed')}>
+            🟣 Reviewed
+          </button>
+        </div>
+      )}
       {/* Pages + optional split-screen page preview */}
       <div className="flex-1 min-h-0 flex overflow-hidden">
         <div
