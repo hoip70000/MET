@@ -26,7 +26,7 @@ import {
 } from './paint/selection';
 import { applyPatch, type PaintSettings } from './paint/paintEngine';
 import { snapSegmentToEdges } from './paint/magneticLasso';
-import { BrushCursor } from './paint/BrushCursor';
+import { ToolCursorOverlay } from './paint/ToolCursorOverlay';
 import type { SerializedStudioLayer } from '../../lib/studioProjectStore';
 import { filterForAdjustment, withStrength } from '../../lib/adjustments';
 
@@ -58,10 +58,18 @@ const RULER_SIZE = 20;
 const RULER_STEP = 100;
 const MARQUEE_TOOLS = new Set(['marquee-rect', 'marquee-ellipse', 'marquee-row', 'marquee-col', 'crop', 'slice']);
 const LASSO_TOOLS = new Set(['lasso-freehand']);
-/** Tools whose footprint is brush-sized, so they get the live outline cursor instead of the OS one. */
-const BRUSH_CURSOR_TOOLS = new Set([
+/** Tools that get ToolCursorOverlay's live SVG chrome (and have the OS cursor hidden in favor of
+ *  it) rather than a plain CSS cursor class — see `cursorClass` below for the CSS-only tools. */
+const SVG_OVERLAY_TOOLS = new Set([
   'brush', 'pencil', 'eraser', 'clone', 'heal', 'blur', 'sharpen', 'smudge',
-  'dodge', 'burn', 'sponge', 'spot-heal', 'liquify',
+  'dodge', 'burn', 'sponge', 'spot-heal', 'liquify', 'contentAware', 'wand', 'eyedropper',
+  'pen', 'curvature-pen',
+]);
+/** Tools with a meaningful drag/click-to-place gesture but no size/sample-specific chrome — a
+ *  plain CSS crosshair is the correct idle cursor (Photoshop uses one for all of these too). */
+const CROSSHAIR_TOOLS = new Set([
+  'marquee-rect', 'marquee-ellipse', 'marquee-row', 'marquee-col', 'crop', 'slice',
+  'lasso-freehand', 'lasso-polygon', 'lasso-magnetic', 'shape-rect', 'shape-ellipse', 'shape-line',
 ]);
 
 interface StudioCanvasProps {
@@ -190,6 +198,10 @@ export interface StudioCanvasHandle {
    * only ever read/write the active layer's own canvas, never the background underneath it.
    */
   seedLayerWithBackground: (layerId: string) => void;
+  /** Permanent regression guard: reads back a pixel from a freshly created layer's raster canvas
+   *  and throws if it isn't fully transparent. Call right after creating a "new layer" action that
+   *  is supposed to start blank — a real, silent regression class this exists to catch loudly. */
+  assertLayerBlank: (layerId: string) => void;
   /** Like seedLayerWithBackground, but draws `maskCanvas` (already carrying its own precise
    *  per-pixel alpha — see whitedDiff.ts) instead of a flat unmasked copy of the background. */
   seedLayerWithMaskedImage: (layerId: string, maskCanvas: HTMLCanvasElement) => void;
@@ -343,6 +355,15 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
   const transformerRef2 = useRef<Konva.Transformer>(null);
   /** Pointer position in container/CSS px for the live brush outline; null when off-canvas. */
   const [brushCursorPos, setBrushCursorPos] = useState<{ x: number; y: number } | null>(null);
+  /** Eyedropper's live-sampled color under the pointer, updated every move — feeds ToolCursorOverlay's swatch. */
+  const [eyedropperColor, setEyedropperColor] = useState<string | null>(null);
+  /** Clone/Heal's alt-clicked sample source, in *image* space — converted to container px at
+   *  render time (see cloneSourceContainerPos below) the same way brushCursorPos already is. */
+  const [cloneSourceImg, setCloneSourceImg] = useState<{ x: number; y: number } | null>(null);
+  /** Pen/Curvature Pen's current pointer position in image space, tracked only while a path is
+   *  in progress and no anchor-handle drag is live — drives the last-anchor-to-pointer preview
+   *  segment so the next click's placement reads live, matching Photoshop's own pen preview. */
+  const [penHoverPos, setPenHoverPos] = useState<{ x: number; y: number } | null>(null);
   /** Pen/Curvature Pen's in-progress path — real anchors with bezier handles, persisted as a
    *  `path`-type layer on commit (Enter/dblclick/closing-click), never rasterized directly. */
   const [penDraft, setPenDraft] = useState<PathAnchor[]>([]);
@@ -409,7 +430,7 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
   const activeLayer = findLayer(layers, activeLayerId) ?? null;
   const isPaintTool = (PAINT_TOOLS as readonly string[]).includes(activeTool);
   const paintLayerIdRef = useRef<string | null>(null);
-  paintLayerIdRef.current = activeLayer?.type === 'clean-patch' ? activeLayer.id : null;
+  paintLayerIdRef.current = activeLayer?.type === 'clean-patch' && !activeLayer.locked ? activeLayer.id : null;
 
   // The layer whose mask is being painted, and that mask's own registry id — derived from the
   // current tree rather than passed as two separate props, so they can never disagree.
@@ -525,6 +546,7 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
     getLayerId: () => paintLayerIdRef.current,
     liquifySnapshots,
     getFallbackCanvas: () => sampleCanvasRef.current,
+    onCloneSourceSet: setCloneSourceImg,
   });
 
   useImperativeHandle(ref, () => ({
@@ -732,6 +754,17 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
       ctx.drawImage(img, 0, 0);
       redrawLayerNode(layerId);
     },
+    assertLayerBlank(layerId: string) {
+      const img = imageRef.current;
+      if (!img) return;
+      const canvas = getOrCreateCanvasFor(paintCanvasRegistry.current, layerId, img.width, img.height);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      const { data } = ctx.getImageData(Math.floor(canvas.width / 2), Math.floor(canvas.height / 2), 1, 1);
+      if (data[3] > 0) {
+        throw new Error('REGRESSION: new layer must be created empty');
+      }
+    },
     seedLayerWithMaskedImage(layerId: string, maskCanvas: HTMLCanvasElement) {
       // Sized from `maskCanvas` itself (already the target page's own dimensions, per
       // whitedDiff.ts), not `imageRef.current` — this can legitimately run for a page that
@@ -830,7 +863,7 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
   // Esc handling above, or surprise-clear a selection a paint tool is deliberately clipped to.
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape' && penDraft.length > 0) { setPenDraft([]); penPlacingRef.current = null; }
+      if (e.key === 'Escape' && penDraft.length > 0) { setPenDraft([]); penPlacingRef.current = null; setPenHoverPos(null); }
       if (e.key === 'Escape' && lassoPolyPoints.length > 0) setLassoPolyPoints([]);
       if (e.key === 'Escape' && transformingSelection) cancelTransformSelection();
       // Esc deselects while a plain marquee/lasso selection tool is active — but not Crop/Slice,
@@ -1366,6 +1399,14 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
       return;
     }
     if (!isPaintTool) return;
+    // Quick Mask and layer-mask editing are legitimate alternate paint targets that bypass
+    // paintLayerIdRef entirely (see getActivePaintCanvas) — only gate the plain "paint onto the
+    // active layer" path here. No layer selected, the Background layer, or a locked layer are all
+    // covered by paintLayerIdRef being null (see its assignment above).
+    if (!editingMaskLayer && !quickMaskActive && !paintLayerIdRef.current) {
+      swalToast({ icon: 'warning', title: 'Select a layer to paint on' });
+      return;
+    }
     const p = imageSpacePointer();
     if (!p) return;
     // A real stylus reports actual pressure; mouse/touch report a flat 0.5 per spec, which isn't
@@ -1407,6 +1448,20 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
     if (panRef.current?.active) return;
     if (e.evt.pointerType === 'touch' && touchCount >= 2) return;
     if (transformingSelection) return;
+    // Live cursor chrome tracking — runs regardless of which gesture branch below (if any) also
+    // handles this move, since neither tool participates in PAINT_TOOLS or any of those branches.
+    if (activeTool === 'eyedropper') {
+      const p = imageSpacePointer();
+      const canvas = sampleCanvasRef.current;
+      if (p && canvas) {
+        const x = Math.max(0, Math.min(canvas.width - 1, Math.round(p.x)));
+        const y = Math.max(0, Math.min(canvas.height - 1, Math.round(p.y)));
+        const d = canvas.getContext('2d')!.getImageData(x, y, 1, 1).data;
+        setEyedropperColor(`#${[d[0], d[1], d[2]].map(v => v.toString(16).padStart(2, '0')).join('')}`);
+      }
+    } else if ((activeTool === 'pen' || activeTool === 'curvature-pen') && penDraft.length > 0 && !penPlacingRef.current) {
+      setPenHoverPos(imageSpacePointer());
+    }
     if (activeTool === 'text' && textDragRef.current) {
       const p = imageSpacePointer();
       const start = textDragRef.current;
@@ -1655,10 +1710,11 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
   };
 
   const commitPenLayer = (closed: boolean) => {
-    if (penDraft.length < 2) { setPenDraft([]); penPlacingRef.current = null; return; }
+    if (penDraft.length < 2) { setPenDraft([]); penPlacingRef.current = null; setPenHoverPos(null); return; }
     onAddPathLayer(penDraft, closed);
     setPenDraft([]);
     penPlacingRef.current = null;
+    setPenHoverPos(null);
   };
 
   const commitLassoPolygon = () => {
@@ -1838,9 +1894,9 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
   // every other tool already uses.
   const draggable = activeTool === 'pan' && !spaceDown;
   const panning = panRef.current?.active || spaceDown;
-  // Hide the OS cursor while a brush-sized tool is armed — the BrushCursor ring below
-  // *is* the cursor, and showing both reads as a doubled pointer.
-  const showBrushCursor = !panning && BRUSH_CURSOR_TOOLS.has(activeTool) && brushCursorPos !== null;
+  // Hide the OS cursor while an overlay-chrome tool is armed — the ToolCursorOverlay ring/glyph
+  // below *is* the cursor, and showing both reads as a doubled pointer.
+  const showToolOverlay = !panning && SVG_OVERLAY_TOOLS.has(activeTool) && brushCursorPos !== null;
   // Move cursor over a text box's own body, away from its Transformer handles (which sit on top
   // and win the hit-test first, so hoveringTextBody never fires for those) — only meaningful with
   // the Select tool actually able to drag it right now.
@@ -1848,11 +1904,23 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
   // Not gated on activeTool: the ⊞ indicator's click/dblclick handlers aren't tool-gated either
   // (it's visible/interactive regardless of selection or active tool), so the cursor matches.
   const showOverflowCursor = !panning && hoveringOverflowIndicator;
-  const cursorClass = panning ? 'cursor-grab'
-    : showBrushCursor ? 'cursor-none'
+  // Photoshop convention: a closed hand while actively panning (Space-held drag or the Hand tool
+  // itself mid-drag), an open hand the rest of the time the Hand tool is merely selected. Zoom
+  // swaps its glyph on Alt (zoom-out) the same way the tool's own click handler already does.
+  const cursorClass = panning ? 'cursor-grabbing'
+    : showToolOverlay ? 'cursor-none'
     : showOverflowCursor ? 'cursor-pointer'
     : showMoveCursor ? 'cursor-move'
+    : activeTool === 'pan' ? 'cursor-grab'
+    : activeTool === 'zoom' ? (altHeld ? 'cursor-zoom-out' : 'cursor-zoom-in')
+    : activeTool === 'text' ? 'cursor-text'
+    : activeTool === 'bucket' ? 'cursor-cell'
+    : CROSSHAIR_TOOLS.has(activeTool) ? 'cursor-crosshair'
     : '';
+  // Clone/Heal's sample source, converted from image space to container px the same way
+  // imageSpacePointer's own inverse would — kept as a plain derived value (not state) so it always
+  // reflects the current pos/scale even if either changes without a new alt-click.
+  const cloneSourceContainerPos = cloneSourceImg ? { x: cloneSourceImg.x * scale + pos.x, y: cloneSourceImg.y * scale + pos.y } : null;
 
   /**
    * Renders a layer list (bottom-to-top) as nested Konva Groups.
@@ -2047,12 +2115,12 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
       ref={containerRef}
       className={`studio-canvas-bg relative w-full h-full overflow-hidden touch-none ${cursorClass}`}
       onPointerMove={(e) => {
-        if (!BRUSH_CURSOR_TOOLS.has(activeTool)) return;
+        if (!SVG_OVERLAY_TOOLS.has(activeTool)) return;
         const rect = containerRef.current?.getBoundingClientRect();
         if (!rect) return;
         setBrushCursorPos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
       }}
-      onPointerLeave={() => setBrushCursorPos(null)}
+      onPointerLeave={() => { setBrushCursorPos(null); setEyedropperColor(null); }}
     >
       {containerSize.width > 0 && (
         <Stage
@@ -2141,6 +2209,41 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
               <Rect x={selection.bounds.x} y={selection.bounds.y} width={selection.bounds.width} height={selection.bounds.height}
                 stroke="#ffffff" strokeWidth={1 / scale} dash={[6 / scale, 4 / scale]} opacity={0.8} />
             )}
+            {/* Live marquee/crop drag readout — mirrors the text-drag-box W×H convention below.
+                Only while an actual drag is in progress (marqueeDraggedRef), not for a committed
+                selection sitting idle, and not for row/col marquees, which commit instantly with
+                no drag to preview. */}
+            {marqueeStartRef.current && marqueeDraggedRef.current && MARQUEE_TOOLS.has(activeTool)
+              && (selection.kind === 'rect' || selection.kind === 'ellipse') && (
+              <>
+                <KonvaText
+                  text={`W: ${Math.round(selection.width)} px / H: ${Math.round(selection.height)} px`}
+                  x={selection.x}
+                  y={selection.y + selection.height + 4 / scale}
+                  fontSize={12 / scale}
+                  fill="#ffffff"
+                  listening={false}
+                />
+                {/* Crop's own corner-handle chrome, visible the instant the drag starts rather than
+                    only once the tool commits — the dashed rect above already reads as "a marquee
+                    is being drawn"; these read specifically as "this will crop". */}
+                {activeTool === 'crop' && selection.kind === 'rect' && (
+                  <>
+                    {[
+                      { x: selection.x, y: selection.y },
+                      { x: selection.x + selection.width, y: selection.y },
+                      { x: selection.x, y: selection.y + selection.height },
+                      { x: selection.x + selection.width, y: selection.y + selection.height },
+                    ].map((c, i) => (
+                      <Group key={i} listening={false}>
+                        <Rect x={c.x - 4 / scale} y={c.y - 4 / scale} width={8 / scale} height={8 / scale} fill="#000000" opacity={0.5} />
+                        <Rect x={c.x - 3 / scale} y={c.y - 3 / scale} width={6 / scale} height={6 / scale} fill="#ffffff" />
+                      </Group>
+                    ))}
+                  </>
+                )}
+              </>
+            )}
             {queuedBubbleRects?.map((rect, i) => (
               <Rect key={i} x={rect.x} y={rect.y} width={rect.width} height={rect.height}
                 stroke="#f59e0b" strokeWidth={1.5 / scale} dash={[4 / scale, 3 / scale]} />
@@ -2185,6 +2288,20 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
                   strokeWidth={2 / scale}
                   listening={false}
                 />
+                {/* Live segment from the last placed anchor to the pointer — the "where would the
+                    next click land" preview Photoshop's own pen tool shows. Only while merely
+                    hovering between placements (penPlacingRef gates it off during an actual
+                    handle-drag, whose own chrome is drawn per-anchor below instead). */}
+                {penHoverPos && (
+                  <Line
+                    points={[penDraft[penDraft.length - 1].point.x, penDraft[penDraft.length - 1].point.y, penHoverPos.x, penHoverPos.y]}
+                    stroke={paintSettings.color}
+                    strokeWidth={1 / scale}
+                    dash={[4 / scale, 3 / scale]}
+                    opacity={0.7}
+                    listening={false}
+                  />
+                )}
                 {penDraft.map((a, i) => (
                   <Group key={a.id}>
                     {(a.handleIn || a.handleOut) && (
@@ -2392,8 +2509,15 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
           />
         );
       })()}
-      {showBrushCursor && (
-        <BrushCursor pos={brushCursorPos} scale={scale} settings={paintSettings} tool={activeTool} />
+      {showToolOverlay && (
+        <ToolCursorOverlay
+          pos={brushCursorPos}
+          scale={scale}
+          settings={paintSettings}
+          tool={activeTool}
+          eyedropperColor={eyedropperColor}
+          cloneSource={cloneSourceContainerPos}
+        />
       )}
       {!page && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-center px-6">
