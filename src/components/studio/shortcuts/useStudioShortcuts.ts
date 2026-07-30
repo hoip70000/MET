@@ -32,6 +32,7 @@ interface UseStudioShortcutsArgs {
   onToggleGrid: () => void;
   onNewLayer: () => void;
   onMergeVisible: () => void;
+  onToggleMultiBubble: () => void;
 }
 
 function isTextInputFocused(): boolean {
@@ -53,7 +54,7 @@ export function useStudioShortcuts({
   onToggleCleaned, onToggleFullscreen, onTogglePanelsHidden, onExport, onGroupLayers, onUngroupLayers,
   onToggleQuickMask, onTextSizeStep, onDeselect, onActualSize, onCutLayer, onCopyLayer, onPasteLayer,
   onFindReplace, onToggleTextBold, onToggleTextItalic, onToggleRulers, onToggleGrid, onNewLayer,
-  onMergeVisible,
+  onMergeVisible, onToggleMultiBubble,
 }: UseStudioShortcutsArgs) {
   const toolMap = useMemo(() => buildToolShortcutMap(), []);
 
@@ -82,6 +83,7 @@ export function useStudioShortcuts({
       // and Ctrl+Shift+E would fall through into that block's unshifted 'e' (Export) case.
       if (mod && e.shiftKey && key === 'n') { e.preventDefault(); onNewLayer(); return; }
       if (mod && e.shiftKey && key === 'e') { e.preventDefault(); onMergeVisible(); return; }
+      if (mod && e.shiftKey && key === 'm') { e.preventDefault(); onToggleMultiBubble(); return; }
 
       if (mod) {
         if (key === 'g') { e.preventDefault(); onGroupLayers(); return; }
@@ -122,6 +124,6 @@ export function useStudioShortcuts({
     onToggleCleaned, onToggleFullscreen, onTogglePanelsHidden, onExport, onGroupLayers, onUngroupLayers,
     onToggleQuickMask, onTextSizeStep, onDeselect, onActualSize, onCutLayer, onCopyLayer, onPasteLayer,
     onFindReplace, onToggleTextBold, onToggleTextItalic, onToggleRulers, onToggleGrid, onNewLayer,
-    onMergeVisible,
+    onMergeVisible, onToggleMultiBubble,
   ]);
 }

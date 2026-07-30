@@ -58,6 +58,10 @@ interface LayersPanelProps {
   activeMaskLayerId?: string | null;
   /** `index` is read against the destination list *after* the dragged layer is detached. */
   onReparent?: (id: string, newParentId: string | null, index: number) => void;
+  /** Right-click > Convert to Point/Area Text. Only ever offered for text layers, gated on the
+   *  layer's own current `text.autoWidth` (Convert to Point Text only when it's currently area
+   *  text, and vice versa) — the caller decides how the box's dimensions get seeded on conversion. */
+  onConvertTextMode?: (id: string, toAutoWidth: boolean) => void;
   /** Explicit "open full settings" intent (the Text/Adjustment panel) — separate from onSelect, so
    *  a plain click never navigates away from this list. No-ops for layer types without a panel. */
   onOpenSettings?: (id: string) => void;
@@ -83,7 +87,7 @@ export function LayersPanel({
   onOpacityChange, onBlendChange, onAdd, onAddBlank, onAddAdjustment, onDuplicate, onDelete, onDeleteMany, onRename, onMove,
   onGroup, onUngroup, onToggleCollapsed, onToggleClipped, onToggleMask, onToggleMaskEnabled, onSelectMask,
   activeMaskLayerId, onReparent, onOpenSettings, expandedLayerId, onToggleExpanded,
-  hideTitle,
+  hideTitle, onConvertTextMode,
 }: LayersPanelProps) {
   const selected = selectedLayerIds ?? (activeLayerId ? [activeLayerId] : []);
   const [dragId, setDragId] = useState<string | null>(null);
@@ -125,6 +129,11 @@ export function LayersPanel({
       duplicate: 'Duplicate',
       visibility: layer.visible ? 'Hide' : 'Show',
       ...(layer.isBackground ? {} : { lock: layer.locked ? 'Unlock' : 'Lock' }),
+      ...(layer.type === 'text' && layer.text && onConvertTextMode
+        ? (layer.text.autoWidth
+          ? { convertText: 'Convert to Area Text' }
+          : { convertText: 'Convert to Point Text' })
+        : {}),
       moveUp: 'Move Up',
       moveDown: 'Move Down',
       ...(layer.isBackground ? {} : { delete: 'Delete' }),
@@ -154,6 +163,7 @@ export function LayersPanel({
         break;
       }
       case 'duplicate': onDuplicate(layer.id); break;
+      case 'convertText': onConvertTextMode?.(layer.id, !layer.text?.autoWidth); break;
       case 'visibility': onToggleVisible(layer.id); break;
       case 'lock': onToggleLocked(layer.id); break;
       case 'moveUp': onMove(layer.id, 'up'); break;
