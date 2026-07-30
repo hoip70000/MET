@@ -1311,9 +1311,12 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
   function alignSelectedImage(align: 'left' | 'center' | 'right') {
     if (!selectedImage) return;
     if (align === 'left') {
-      selectedImage.style.cssFloat = 'left';
-      selectedImage.style.display = 'inline-block';
-      selectedImage.style.margin = '0 8px 8px 0';
+      // "Left" is the default, plain-inline state — flows inline with surrounding text like any
+      // other inline element (the same state a freshly-inserted image already starts in), not a
+      // float. Floating left would instead wrap text around the image's right edge.
+      selectedImage.style.cssFloat = 'none';
+      selectedImage.style.display = 'inline';
+      selectedImage.style.margin = '';
     } else if (align === 'right') {
       selectedImage.style.cssFloat = 'right';
       selectedImage.style.display = 'inline-block';
