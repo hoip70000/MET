@@ -4,7 +4,7 @@ import {
   List, ListOrdered, Search, Download, FileType, Printer, Send, Heading1, Heading2,
   Check, Loader2, AlertCircle, Circle, PanelRight, Table as TableIcon,
   Pencil, Eye,
-  Cloud, CloudOff, Loader2, Heading3, Heading4, AlignJustify, IndentIncrease, IndentDecrease,
+  Heading3, Heading4, AlignJustify, IndentIncrease, IndentDecrease,
   Strikethrough, Undo2, Redo2, Languages, ChevronUp, ChevronDown, Minus, Clock,
   Maximize2, Minimize2, Sun, Moon, Columns2, ChevronLeft, ChevronRight,
 } from 'lucide-react';
@@ -13,7 +13,7 @@ import { useTheme } from '../../contexts/ThemeContext';
 import { swal, swalToast, Swal } from '../../lib/swalTheme';
 import { genId } from '../../lib/id';
 import { loadTextEditorDocs, saveTextEditorDocs, defaultDocStatus, type TextEditorDoc, type TextEditorDocStatus } from '../../lib/textEditorStore';
-import { markMisspellings, stripSpellMarks, findSpellIssues } from '../../lib/spellCheck';
+import { markMisspellings, markMisspellingsLive, stripSpellMarks, findAllSpellIssues } from '../../lib/spellCheck';
 import { exportDocAsTxt, exportDocAsDocx, printDocAsPdf, downloadBlob } from '../../lib/textEditorExport';
 import { SplitScreenPreview } from './SplitScreenPreview';
 import { DocumentLibrary } from './DocumentLibrary';
@@ -25,7 +25,16 @@ import {
   type CaretRestorePoint,
 } from '../../lib/textEditorTables';
 import { markSelectionAs, stripStatusMarks, type MarkStatus } from '../../lib/textEditorMarks';
-import type { Workspace } from '../../types';
+import { pushTextEditorVersion, listTextEditorVersions, restoreTextEditorVersion, type TextEditorVersionSnapshot } from '../../lib/textEditorVersionStore';
+import { loadStoredFonts } from '../../lib/fontsStore';
+import { registerStoredFont, readFileAsDataUrl } from '../../lib/fontLoader';
+import { FONT_FAMILIES } from '../studio/studioTypes';
+import { TextEditorMenuBar } from './TextEditorMenuBar';
+import type { TextEditorMenuActions } from './textEditorMenuDefinitions';
+import { useTextEditorShortcuts } from './useTextEditorShortcuts';
+import { SendToTyperDialog, type SendToTyperChapterOption, type SendToTyperResult } from './SendToTyperDialog';
+import type { TyperSendRequest } from '../../lib/typerBridge';
+import type { Workspace, Chapter } from '../../types';
 
 /**
  * Section 0 architecture audit (see plan doc for full detail):
@@ -67,19 +76,6 @@ import type { Workspace } from '../../types';
  * A7 split preview — did not exist; `TextEditorPage` had no reference to
  *   workspaces/chapters before this session.
  */
-import { loadTextEditorDocs, saveTextEditorDocs, type TextEditorDoc } from '../../lib/textEditorStore';
-import { markMisspellings, markMisspellingsLive, stripSpellMarks, findAllSpellIssues } from '../../lib/spellCheck';
-import { exportDocAsTxt, exportDocAsDocx, printDocAsPdf, downloadBlob } from '../../lib/textEditorExport';
-import { pushTextEditorVersion, listTextEditorVersions, restoreTextEditorVersion, type TextEditorVersionSnapshot } from '../../lib/textEditorVersionStore';
-import { loadStoredFonts } from '../../lib/fontsStore';
-import { registerStoredFont, readFileAsDataUrl } from '../../lib/fontLoader';
-import { FONT_FAMILIES } from '../studio/studioTypes';
-import { TextEditorMenuBar } from './TextEditorMenuBar';
-import type { TextEditorMenuActions } from './textEditorMenuDefinitions';
-import { useTextEditorShortcuts } from './useTextEditorShortcuts';
-import { SendToTyperDialog, type SendToTyperChapterOption, type SendToTyperResult } from './SendToTyperDialog';
-import type { TyperSendRequest } from '../../lib/typerBridge';
-import type { Workspace, Chapter } from '../../types';
 
 const PAGE_WIDTH = 794; // A4 at 96dpi
 const PAGE_HEIGHT = 1123;
@@ -90,6 +86,13 @@ const MAX_SPLIT_RATIO = 0.8;
 
 function newDoc(title = 'Untitled'): TextEditorDoc {
   return { id: genId('tedoc'), title, dir: 'ltr', pages: [''], updatedAt: Date.now(), status: defaultDocStatus() };
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  return `${(kb / 1024).toFixed(1)} MB`;
 }
 
 interface EditablePageProps {
@@ -126,24 +129,6 @@ const EditablePage = memo(function EditablePage({ initialHtml, pageRef, onInput,
 });
 
 interface TextEditorPageProps {
-  onSendToTyper: (script: string) => void;
-  /** Whether a Studio chapter is currently open — Send to TypeR switches the top-level view to
-   *  Library either way, but only actually lands on the Studio (where the script is waiting) if
-   *  one is; the toast wording reflects which case this is instead of always claiming success. */
-  hasActiveChapter: boolean;
-  workspaces: Workspace[];
-}
-
-export function TextEditorPage({ onSendToTyper, hasActiveChapter, workspaces }: TextEditorPageProps) {
-  const [splitScreenOpen, setSplitScreenOpen] = useState(false);
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  const kb = bytes / 1024;
-  if (kb < 1024) return `${kb.toFixed(1)} KB`;
-  return `${(kb / 1024).toFixed(1)} MB`;
-}
-
-interface TextEditorPageProps {
   onSendToTyper: (request: TyperSendRequest) => void;
   /** Full workspace tree, read-only — flattened into the Send-to-TypeR dialog's chapter picker.
    *  Nothing here is ever mutated; sending goes through onSendToTyper only. */
@@ -160,6 +145,7 @@ interface TextEditorPageProps {
 }
 
 export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, studioActivePageId }: TextEditorPageProps) {
+  const [splitScreenOpen, setSplitScreenOpen] = useState(false);
   // The app-wide theme (same one TopBar/SettingsPanel toggle) — not a second, editor-local theme
   // system. Pages themselves stay bg-white/text-black regardless (see the page div's own
   // className below), since they represent paper, not chrome.
@@ -192,7 +178,6 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
   const [markMenuPos, setMarkMenuPos] = useState<{ x: number; y: number } | null>(null);
   const markMenuRef = useRef<HTMLDivElement | null>(null);
   const markSelectionRef = useRef<{ root: HTMLElement; range: Range } | null>(null);
-  const [saveState, setSaveState] = useState<'saved' | 'unsaved' | 'saving'>('saved');
   const [sendToTyperOpen, setSendToTyperOpen] = useState(false);
 
   // Full screen: mirrors Studio.tsx's own studioRootRef/isFullscreen/toggleFullscreen idiom exactly,
@@ -282,11 +267,10 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
   const pageRefs = useRef<(HTMLDivElement | null)[]>([]);
   const dirtyRef = useRef(false);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /** Mirrors `docs` state so the live content can be read/merged without waiting
-   *  for (or forcing) a re-render — see `getDocsWithLiveContent`. */
+  // Always-current mirrors of `docs`/`activeDocId`, read from async callbacks (the debounced
+  // autosave timeout, the unmount flush) instead of the closed-over state values, which go stale
+  // the moment a callback outlives the render that created it.
   const docsRef = useRef<TextEditorDoc[]>([]);
-  /** Mirrors `activeDocId` so helpers callable from a once-created closure
-   *  (e.g. the unmount cleanup below) never read a stale id. */
   const activeDocIdRef = useRef<string | null>(null);
   /** Stable per-page-index ref callbacks — reusing the same function reference
    *  across renders is required for `EditablePage`'s `memo` to bail out (a
@@ -301,7 +285,7 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
   const runKeyDownLogicRef = useRef<(e: React.KeyboardEvent) => void>(() => {});
   const runContextMenuLogicRef = useRef<(e: React.MouseEvent) => void>(() => {});
 
-  useEffect(() => { activeDocIdRef.current = activeDocId; }, [activeDocId]);
+  useEffect(() => { docsRef.current = docs; activeDocIdRef.current = activeDocId; }, [docs, activeDocId]);
 
   function getPageRefCallback(i: number): (el: HTMLDivElement | null) => void {
     const cache = pageRefCallbacksRef.current;
@@ -324,12 +308,6 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     docsRef.current = next;
     setDocs(next);
   }
-  // Always-current mirrors of `docs`/`activeDocId`, read from async callbacks (the debounced
-  // autosave timeout, the unmount flush) instead of the closed-over state values, which go stale
-  // the moment a callback outlives the render that created it.
-  const docsRef = useRef<TextEditorDoc[]>([]);
-  const activeDocIdRef = useRef<string | null>(null);
-  useEffect(() => { docsRef.current = docs; activeDocIdRef.current = activeDocId; }, [docs, activeDocId]);
   // The actual source of truth for what each page's `dangerouslySetInnerHTML` renders. Deliberately
   // NOT derived from `docs` on every render: `docs` (and thus `activeDoc.pages`) is intentionally
   // stale while typing (see reflow()'s own comment), and autosave eventually reconciles it with the
@@ -403,32 +381,21 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
   function scheduleAutosave() {
     dirtyRef.current = true;
     setSaveStatus('unsaved');
-    setSaveState('unsaved');
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
     saveTimeoutRef.current = setTimeout(() => {
       if (!dirtyRef.current) return;
       dirtyRef.current = false;
-      void flushSave();
-      setSaveState('saving');
       // Deliberately reads live DOM + the always-current refs, not the `docs`/`activeDocId`
       // closed over at schedule-time, and deliberately never writes `pageSeedRef` — see its own
       // comment above. This is what keeps a debounced autosave from ever touching the on-screen
       // contenteditable content.
-      const docId = activeDocIdRef.current;
-      const pages = captureActiveDocPages();
-      const nextDocs = docsRef.current.map(d => d.id === docId ? { ...d, pages } : d);
-      setDocs(nextDocs);
-      saveTextEditorDocs(nextDocs)
-        .then(() => setSaveState('saved'))
-        .catch((err) => {
-          console.error(err);
-          setSaveState('unsaved');
-          swalToast({ icon: 'error', title: 'Autosave failed' });
-        });
+      void flushSave();
       // Every debounced autosave also pushes a capped version snapshot — the same cadence
       // studioProjectStore.ts's flushAutosave already uses for Studio (save + pushVersionSnapshot
-      // back-to-back), not a separately-invented interval.
-      const activeAfterSave = nextDocs.find(d => d.id === docId);
+      // back-to-back), not a separately-invented interval. `flushSave` updates `docsRef`
+      // synchronously before its first `await`, so it's already current here.
+      const docId = activeDocIdRef.current;
+      const activeAfterSave = docsRef.current.find(d => d.id === docId);
       if (activeAfterSave) pushTextEditorVersion(activeAfterSave.id, activeAfterSave).catch(console.error);
     }, AUTOSAVE_MS);
   }
@@ -460,13 +427,9 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
 
   useEffect(() => () => {
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+    if (spellTimeoutRef.current) clearTimeout(spellTimeoutRef.current);
     if (dirtyRef.current) {
       saveTextEditorDocs(getDocsWithLiveContent()).catch(console.error);
-    if (spellTimeoutRef.current) clearTimeout(spellTimeoutRef.current);
-    const docId = activeDocIdRef.current;
-    if (dirtyRef.current && docId) {
-      const pages = captureActiveDocPages();
-      saveTextEditorDocs(docsRef.current.map(d => d.id === docId ? { ...d, pages } : d)).catch(console.error);
     }
   }, []);
 
@@ -555,14 +518,12 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
       // Only ever grows/truncates the pages array *length* — every untouched
       // page's string reference is preserved as-is, so this never disturbs a
       // live-edited page's dangerouslySetInnerHTML value (see Section 0 audit).
-      updateDocs(docsRef.current.map((d) => {
-      const docId = activeDocId;
       // Rebuild from each existing page's *current live DOM content*, not the possibly-stale
       // `d.pages` React state, purely for persistence bookkeeping — page content itself no longer
       // renders from `d.pages` (see pageSeedRef's own comment), but keeping it fresh here still
       // matters for whatever the *next* save/export/close reads.
       const freshPages = captureActiveDocPages();
-      setDocs(prev => prev.map((d) => {
+      updateDocs(docsRef.current.map((d) => {
         if (d.id !== docId) return d;
         const pages = [...freshPages];
         if (neededCount > pages.length) {
@@ -910,7 +871,7 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
    *
    *  Critically, this also syncs React's `pages` state to match the live DOM immediately —
    *  *before* returning control to a caller that's about to trigger further state updates
-   *  (`scheduleAutosave`'s own `setSaveState`, in particular). A menu-triggered insertion runs
+   *  (`scheduleAutosave`'s own `setSaveStatus`, in particular). A menu-triggered insertion runs
    *  outside a React synthetic event (it's continuing after an awaited `swal()` promise), and any
    *  state update in that continuation was found to force an immediate, synchronous re-render —
    *  which re-applies `dangerouslySetInnerHTML` for *every* page from `pages[i]`. That's normally
@@ -1241,11 +1202,8 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     docCounterRef.current += 1;
     const doc = newDoc(`Document ${docCounterRef.current}`);
     const next = [...based, doc];
-    updateDocs(next);
-    const doc = newDoc(`Document ${docs.length + 1}`);
-    const next = [...docs, doc];
     pageSeedRef.current = doc.pages;
-    setDocs(next);
+    updateDocs(next);
     setActiveDocId(doc.id);
     setRenderKey(k => k + 1);
     saveTextEditorDocs(next).catch(console.error);
@@ -1260,13 +1218,6 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     if (based.length <= 1) return;
     const next = based.filter(d => d.id !== id);
     updateDocs(next);
-    if (activeDocId === id) setActiveDocId(next[0].id);
-    if (docs.length <= 1) return;
-    const sourceDocs = id === activeDocId
-      ? docs.map(d => d.id === id ? { ...d, pages: captureActiveDocPages() } : d)
-      : docs;
-    const next = sourceDocs.filter(d => d.id !== id);
-    setDocs(next);
     if (activeDocId === id) {
       pageSeedRef.current = next[0].pages;
       setActiveDocId(next[0].id);
@@ -1297,28 +1248,13 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     saveTextEditorDocs(fresh).catch(console.error);
   }
 
-  async function renameDoc(id: string) {
+  async function renameDocPrompt(id: string) {
     const doc = docs.find(d => d.id === id);
     if (!doc) return;
     const result = await swal({ title: 'Rename document', input: 'text', inputValue: doc.title, showCancelButton: true, confirmButtonText: 'Rename' });
     const title = (result.value as string | undefined)?.trim();
     if (!result.isConfirmed || !title) return;
-    const next = docs.map(d => d.id === id ? { ...d, title } : d);
-    setDocs(next);
-    saveTextEditorDocs(next).catch(console.error);
-  }
-
-  function duplicateDoc(id: string) {
-    const source = docs.find(d => d.id === id);
-    if (!source) return;
-    const sourcePages = id === activeDocId ? captureActiveDocPages() : source.pages;
-    const copy: TextEditorDoc = { ...source, id: genId('tedoc'), title: `${source.title} copy`, pages: [...sourcePages] };
-    const next = [...docs, copy];
-    pageSeedRef.current = copy.pages;
-    setDocs(next);
-    setActiveDocId(copy.id);
-    setRenderKey(k => k + 1);
-    saveTextEditorDocs(next).catch(console.error);
+    renameDoc(id, title);
   }
 
   function renameDoc(id: string, title: string) {
@@ -1398,9 +1334,6 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
   }
 
   function runPageClickLogic(e: React.MouseEvent) {
-  const [selectedImage, setSelectedImage] = useState<HTMLImageElement | null>(null);
-
-  function handlePageClick(e: React.MouseEvent) {
     const target = e.target as HTMLElement;
     if (target.classList.contains('spell-miss')) {
       target.replaceWith(document.createTextNode(target.dataset.fix ?? target.textContent ?? ''));
@@ -1670,11 +1603,6 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     document.execCommand('insertHTML', false, insertTableHtml(rows, cols));
     scheduleAutosave();
     reflow();
-    if (target instanceof HTMLImageElement) {
-      setSelectedImage(target);
-      return;
-    }
-    setSelectedImage(null);
   }
 
   /** Insert > Image: reads the chosen file as a data URL (embedding it directly in the page's own
@@ -2258,20 +2186,9 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
           <SaveStatusIcon size={12} className={saveStatus === 'saving' ? 'animate-spin' : ''} />
           {saveStatusLabel}
         </span>
-        <IconButton size="sm" aria-label="Find & replace" onClick={() => setSearchOpen(v => !v)} className={`!bg-transparent shrink-0 ${searchOpen ? '!text-accent' : ''}`}>
-          <Search size={14} />
-        </IconButton>
         <IconButton size="sm" aria-label="Toggle split screen" onClick={() => setSplitScreenOpen(v => !v)} className={`!bg-transparent shrink-0 ${splitScreenOpen ? '!text-accent' : ''}`}>
           <PanelRight size={14} />
-        <span className="flex items-center gap-1 text-[11px] text-ink-faint shrink-0 px-1" title="Autosave status">
-          {saveState === 'saving' ? (
-            <><Loader2 size={12} className="animate-spin" /> Saving…</>
-          ) : saveState === 'unsaved' ? (
-            <><CloudOff size={12} /> Unsaved changes</>
-          ) : (
-            <><Cloud size={12} /> Saved</>
-          )}
-        </span>
+        </IconButton>
         <IconButton size="sm" aria-label="Find & replace" onClick={() => (searchOpen ? closeFindPanel() : openFindPanel('replace'))} className={`!bg-transparent shrink-0 ${searchOpen ? '!text-accent' : ''}`}>
           <Search size={14} />
         </IconButton>
@@ -2632,7 +2549,7 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
           x={tabMenu.x}
           y={tabMenu.y}
           onClose={() => setTabMenu(null)}
-          onRename={() => renameDoc(tabMenu.docId)}
+          onRename={() => renameDocPrompt(tabMenu.docId)}
           onDuplicate={() => duplicateDoc(tabMenu.docId)}
           onCloseOthers={() => closeOtherDocs(tabMenu.docId)}
           onCloseAll={closeAllDocs}
@@ -2686,6 +2603,7 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
         pageCount={activeDoc?.pages.length ?? 1}
         onConfirm={confirmSendToTyper}
       />
+      </div>
     </div>
   );
 }
