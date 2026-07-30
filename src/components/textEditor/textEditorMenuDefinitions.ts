@@ -16,7 +16,7 @@ export interface TextEditorMenuActions {
   redo: () => void;
   openFind: () => void;
   openFindReplace: () => void;
-  runSpellCheck: () => void;
+  toggleSpellCheck: () => void;
 
   zoomIn: () => void;
   zoomOut: () => void;
@@ -75,7 +75,7 @@ export function buildTextEditorMenus(a: TextEditorMenuActions): MenuDef[] {
         { id: 'find', label: 'Find', shortcut: 'Ctrl+F', action: a.openFind },
         { id: 'find-replace', label: 'Find & Replace', shortcut: 'Ctrl+H', action: a.openFindReplace },
         sep('sep2'),
-        { id: 'spell', label: 'Spell Check', action: a.runSpellCheck },
+        { id: 'spell', label: 'Spell Check', action: a.toggleSpellCheck },
       ],
     },
     {

@@ -13,7 +13,7 @@ import { useTheme } from '../../contexts/ThemeContext';
 import { swal, swalToast, Swal } from '../../lib/swalTheme';
 import { genId } from '../../lib/id';
 import { loadTextEditorDocs, saveTextEditorDocs, defaultDocStatus, type TextEditorDoc, type TextEditorDocStatus } from '../../lib/textEditorStore';
-import { markMisspellings, markMisspellingsLive, stripSpellMarks, findAllSpellIssues } from '../../lib/spellCheck';
+import { stripSpellMarks } from '../../lib/spellCheck';
 import { exportDocAsTxt, exportDocAsDocx, printDocAsPdf, downloadBlob } from '../../lib/textEditorExport';
 import { SplitScreenPreview } from './SplitScreenPreview';
 import { DocumentLibrary } from './DocumentLibrary';
@@ -110,42 +110,40 @@ interface EditablePageProps {
   onClick: (e: React.MouseEvent) => void;
   onKeyDown: (e: React.KeyboardEvent) => void;
   onContextMenu: (e: React.MouseEvent) => void;
-  zoom: number;
-  pageNumber: number;
-  pageCount: number;
 }
 
 /** Isolated behind `memo` deliberately — see the A2 note in the audit comment
  *  above. Must receive only stable/primitive props (a string, not a fresh
  *  `{__html}` wrapper object; stable callback references) or the memoization
- *  is defeated and every parent re-render still reaches into this DOM. `zoom`/
- *  `pageNumber`/`pageCount` are primitives, so adding them doesn't affect that
- *  contract — memo's shallow comparison is fine with primitive props changing. */
-const EditablePage = memo(function EditablePage({ initialHtml, pageRef, onInput, onClick, onKeyDown, onContextMenu, zoom, pageNumber, pageCount }: EditablePageProps) {
+ *  is defeated and every parent re-render still reaches into this DOM.
+ *
+ *  This isn't just about *comparing* props cheaply — it turned out to be about whether
+ *  `dangerouslySetInnerHTML` gets reapplied at all. `initialHtml` (from `docs` state) is
+ *  intentionally stale while typing (state is never synced on every keystroke — see A2 above),
+ *  so it can sit at `''` for a brand-new page indefinitely while the *live* DOM already has real
+ *  typed content the browser put there directly. That's safe only as long as this component never
+ *  actually re-renders past its initial mount: the FIRST time it does — for *any* reason, even an
+ *  unrelated prop most would assume is harmless — React diffs and reapplies
+ *  `dangerouslySetInnerHTML` against that stale value, wiping the live content back to it.
+ *  Confirmed empirically (not assumed): adding a primitive `zoom`/`spellCheckActive` prop here
+ *  and toggling it after typing reproduced exactly this wipe. Anything that needs to vary per
+ *  render (zoom, the page-number footer, the spellcheck attribute) has to live *outside* this
+ *  component (the parent's own wrapper JSX) or be applied imperatively via `pageRefs` in a
+ *  `useEffect`, never as a prop that flows into this render. */
+const EditablePage = memo(function EditablePage({ initialHtml, pageRef, onInput, onClick, onKeyDown, onContextMenu }: EditablePageProps) {
   return (
-    <div className="shrink-0 relative" style={{ width: PAGE_WIDTH * zoom, height: PAGE_HEIGHT * zoom }}>
-      <div
-        className="overflow-hidden rounded-sm shadow-2xl"
-        style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT, transform: `scale(${zoom})`, transformOrigin: 'top left' }}
-      >
-        <div
-          ref={pageRef}
-          contentEditable
-          suppressContentEditableWarning
-          spellCheck
-          dangerouslySetInnerHTML={{ __html: initialHtml }}
-          onInput={onInput}
-          onClick={onClick}
-          onKeyDown={onKeyDown}
-          onContextMenu={onContextMenu}
-          className="te-page bg-white text-black px-16 py-16 text-[15px] leading-relaxed outline-none overflow-hidden"
-          style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT, minHeight: PAGE_HEIGHT, colorScheme: 'light' }}
-        />
-      </div>
-      <div className="absolute bottom-1 inset-x-0 text-center text-[11px] text-ink-faint pointer-events-none select-none">
-        {pageNumber} / {pageCount}
-      </div>
-    </div>
+    <div
+      ref={pageRef}
+      contentEditable
+      suppressContentEditableWarning
+      dangerouslySetInnerHTML={{ __html: initialHtml }}
+      onInput={onInput}
+      onClick={onClick}
+      onKeyDown={onKeyDown}
+      onContextMenu={onContextMenu}
+      className="te-page bg-white text-black px-16 py-16 text-[15px] leading-relaxed outline-none overflow-hidden"
+      style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT, minHeight: PAGE_HEIGHT, colorScheme: 'light' }}
+    />
   );
 });
 
@@ -183,7 +181,6 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
   const [wholeWord, setWholeWord] = useState(false);
   const [matchCount, setMatchCount] = useState(0);
   const [currentMatchIndex, setCurrentMatchIndex] = useState(0);
-  const [spellReport, setSpellReport] = useState<number | null>(null);
   const [saveStatus, setSaveStatus] = useState<'saved' | 'unsaved' | 'saving' | 'error'>('saved');
   const [activeTable, setActiveTable] = useState<HTMLTableElement | null>(null);
   const [tableFullySelected, setTableFullySelected] = useState(false);
@@ -1179,34 +1176,23 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
 
   const [tabMenu, setTabMenu] = useState<{ docId: string; x: number; y: number } | null>(null);
 
-  function runSpellCheck() {
-    if (!activeDoc) return;
-    const pages = captureActiveDocPages().map(html => markMisspellings(stripSpellMarks(html)));
-    const total = pages.reduce((sum, html) => {
-      const container = document.createElement('div');
-      container.innerHTML = html;
-      return sum + findAllSpellIssues(container.innerText).length;
-    }, 0);
-    commitActiveDocPages(pages);
-    setRenderKey(k => k + 1);
-    setSpellReport(total);
-    scheduleAutosave();
+  /** Native browser spellcheck only — toggles the `spellcheck` DOM property directly on every
+   *  page's contentEditable, imperatively, rather than passing it down as an EditablePage prop.
+   *  EditablePage must never re-render past its initial mount (see its own comment) — a prop here
+   *  would trigger exactly that. The browser underlines misspelled words and offers its own
+   *  right-click suggestions; nothing here ever touches page content, so there's nothing that can
+   *  lose or corrupt text the way the old dictionary-based implementation could (it rewrote every
+   *  page's innerHTML and forced a full remount just to apply/clear marks). */
+  const [spellCheckActive, setSpellCheckActive] = useState(true);
+  function toggleSpellCheck() {
+    setSpellCheckActive(v => !v);
   }
-
-  function clearSpellMarks() {
-    if (!activeDoc) return;
-    commitActiveDocPages(captureActiveDocPages().map(stripSpellMarks));
-    setRenderKey(k => k + 1);
-    setSpellReport(null);
-  }
+  useEffect(() => {
+    pageRefs.current.forEach((p) => { if (p) p.spellcheck = spellCheckActive; });
+  });
 
   function runPageClickLogic(e: React.MouseEvent) {
     const target = e.target as HTMLElement;
-    if (target.classList.contains('spell-miss')) {
-      target.replaceWith(document.createTextNode(target.dataset.fix ?? target.textContent ?? ''));
-      scheduleAutosave();
-      return;
-    }
     if (target.tagName === 'IMG') {
       setSelectedImage(target as HTMLImageElement);
       setActiveTable(null);
@@ -1602,11 +1588,10 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     handleInput();
   }
 
-  // Live, 800ms-debounced content analysis: marks misspellings directly on the live page DOM (no
-  // captureActiveDocPages/commitActiveDocPages/renderKey bump — that path is only safe for the
-  // explicit "Spell Check" button click above, not as a background side effect of typing) so it
-  // never disrupts the caret mid-keystroke, and recomputes the status bar's word/char counts in
-  // the same pass — one debounce timer doing both jobs rather than two independently racing ones.
+  // Live, 800ms-debounced word/char count — reads the live page DOM directly (no
+  // captureActiveDocPages/commitActiveDocPages/renderKey bump) so it never disrupts the caret
+  // mid-keystroke. Spell checking itself is the browser's own native `spellCheck` attribute (see
+  // EditablePage/toggleSpellCheck) — this pass no longer does any of its own DOM marking.
   const [wordCount, setWordCount] = useState(0);
   const [charCount, setCharCount] = useState(0);
   const [charCountNoSpaces, setCharCountNoSpaces] = useState(0);
@@ -1614,12 +1599,9 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
   function scheduleContentAnalysis() {
     if (spellTimeoutRef.current) clearTimeout(spellTimeoutRef.current);
     spellTimeoutRef.current = setTimeout(() => {
-      const sel = window.getSelection();
-      const skipNode = sel && sel.rangeCount > 0 ? sel.getRangeAt(0).startContainer : null;
       let text = '';
       pageRefs.current.forEach((page) => {
         if (!page) return;
-        markMisspellingsLive(page, skipNode);
         text += `${page.innerText}\n`;
       });
       const words = text.trim().split(/\s+/).filter(Boolean);
@@ -1774,7 +1756,7 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
   }
 
   /** Replace All is a discrete, explicit bulk action — unlike live highlighting, a full remount
-   *  here is fine (same category as the "Spell Check" button click). */
+   *  here is fine (same category as inserting a table or a hard page break). */
   function replaceInDoc() {
     if (!query.trim() || !activeDoc) return;
     const regex = buildFindRegex();
@@ -1986,7 +1968,7 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     redo: () => exec('redo'),
     openFind: () => openFindPanel('find'),
     openFindReplace: () => openFindPanel('replace'),
-    runSpellCheck,
+    toggleSpellCheck,
     zoomIn: () => setZoom(z => Math.min(2, Math.round((z + 0.1) * 10) / 10)),
     zoomOut: () => setZoom(z => Math.max(0.5, Math.round((z - 0.1) * 10) / 10)),
     zoomReset: () => setZoom(1),
@@ -2212,11 +2194,15 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
           <Languages size={14} />
         </IconButton>
         <div className="w-px h-5 bg-hairline mx-1.5" />
-        <Button size="sm" variant="secondary" onClick={runSpellCheck}>Spell Check</Button>
-        {spellReport !== null && (
-          <span className="text-[11px] text-ink-faint px-1">{spellReport === 0 ? 'No issues' : `${spellReport} issue(s)`}</span>
-        )}
-        {spellReport !== null && <Button size="sm" variant="ghost" onClick={clearSpellMarks}>Clear</Button>}
+        <Button
+          size="sm"
+          variant={spellCheckActive ? 'primary' : 'secondary'}
+          aria-pressed={spellCheckActive}
+          title={spellCheckActive ? 'Spell check on — click to turn off' : 'Spell check off — click to turn on'}
+          onClick={toggleSpellCheck}
+        >
+          Spell Check
+        </Button>
         <div className="flex-1" />
         <Button size="sm" variant="secondary" onClick={handleSendToTyper}><Send size={13} /> Send to TypeR</Button>
         <Button size="sm" variant="secondary" onClick={() => activeDoc && exportDocAsTxt({ ...activeDoc, pages: capturePagesForExport() })}>
@@ -2284,18 +2270,24 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
         {activeDoc && (
           <div key={`${activeDoc.id}-${renderKey}`} className="flex flex-col items-center gap-6" dir={activeDoc.dir}>
             {activeDoc.pages.map((html, i) => (
-              <EditablePage
-                key={i}
-                initialHtml={html}
-                pageRef={getPageRefCallback(i)}
-                onInput={handleInput}
-                onClick={handlePageClick}
-                onKeyDown={handleKeyDown}
-                onContextMenu={handleContextMenu}
-                zoom={zoom}
-                pageNumber={i + 1}
-                pageCount={activeDoc.pages.length}
-              />
+              <div key={i} className="shrink-0 relative" style={{ width: PAGE_WIDTH * zoom, height: PAGE_HEIGHT * zoom }}>
+                <div
+                  className="overflow-hidden rounded-sm shadow-2xl"
+                  style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT, transform: `scale(${zoom})`, transformOrigin: 'top left' }}
+                >
+                  <EditablePage
+                    initialHtml={html}
+                    pageRef={getPageRefCallback(i)}
+                    onInput={handleInput}
+                    onClick={handlePageClick}
+                    onKeyDown={handleKeyDown}
+                    onContextMenu={handleContextMenu}
+                  />
+                </div>
+                <div className="absolute bottom-1 inset-x-0 text-center text-[11px] text-ink-faint pointer-events-none select-none">
+                  {i + 1} / {activeDoc.pages.length}
+                </div>
+              </div>
             ))}
           </div>
         )}
