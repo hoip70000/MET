@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Send, Crown } from 'lucide-react';
+import { Send, Crown, Mic, MicOff, PhoneOff } from 'lucide-react';
 import { StudioPanel } from './StudioPanel';
 import type { StudioCollabPeer } from '../../lib/studioCollab';
 
@@ -15,16 +15,43 @@ interface CollabSessionPanelProps {
   messages: CollabChatMessage[];
   selfUserId: string;
   onSend: (text: string) => void;
+  /** Participants (by userId) whose mic volume is currently above the speaking threshold — pulses
+   *  their roster avatar. Includes the local user when they're the one talking. */
+  speakingUserIds: Set<string>;
+  voiceJoined: boolean;
+  voiceMuted: boolean;
+  onToggleVoiceJoined: () => void;
+  onToggleVoiceMuted: () => void;
   hideTitle?: boolean;
 }
 
+/** Small circular avatar (initial letter, no photo support — matches the collab roster's identity
+ *  being name-only) with a pulsing ring while `speaking` is true. */
+function PeerAvatar({ name, speaking }: { name: string; speaking: boolean }) {
+  return (
+    <span className="relative shrink-0">
+      {speaking && <span className="absolute -inset-0.5 rounded-full bg-success/60 animate-ping" />}
+      <span
+        className={`relative w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-semibold text-white ${
+          speaking ? 'bg-success ring-2 ring-success/40' : 'bg-accent/70'
+        }`}
+      >
+        {(name || '?')[0]?.toUpperCase()}
+      </span>
+    </span>
+  );
+}
+
 /**
- * Roster + chat for a live collaborative Studio session. Chat is broadcast-only/ephemeral (no
- * table, mirrors chat.ts's typing-indicator broadcast) — it exists for participants watching
- * live, not as a record to read back later, so `messages` is whatever this mount has seen since
- * it joined the channel.
+ * Roster + chat + mic voice chat for a live collaborative Studio session. Chat is broadcast-only/
+ * ephemeral (no table, mirrors chat.ts's typing-indicator broadcast) — it exists for participants
+ * watching live, not as a record to read back later, so `messages` is whatever this mount has
+ * seen since it joined the channel. Voice is a separate opt-in (useStudioVoiceChat.ts's WebRTC
+ * mesh) — joining the session never requests mic access on its own.
  */
-export function CollabSessionPanel({ peers, messages, selfUserId, onSend, hideTitle }: CollabSessionPanelProps) {
+export function CollabSessionPanel({
+  peers, messages, selfUserId, onSend, speakingUserIds, voiceJoined, voiceMuted, onToggleVoiceJoined, onToggleVoiceMuted, hideTitle,
+}: CollabSessionPanelProps) {
   const [draft, setDraft] = useState('');
 
   function submit() {
@@ -42,13 +69,38 @@ export function CollabSessionPanel({ peers, messages, selfUserId, onSend, hideTi
           {peers.map((p) => (
             <span
               key={p.userId}
-              className="flex items-center gap-1 shrink-0 px-2 py-1 rounded-full bg-ink/5 border border-hairline text-micro text-ink"
+              className="flex items-center gap-1 shrink-0 pl-1 pr-2 py-1 rounded-full bg-ink/5 border border-hairline text-micro text-ink"
               title={p.isHost ? `${p.name} (host)` : p.name}
             >
+              <PeerAvatar name={p.name} speaking={speakingUserIds.has(p.userId)} />
               {p.isHost && <Crown size={10} className="text-accent" />}
               {p.name}
             </span>
           ))}
+        </div>
+
+        <div className="flex items-center gap-2 px-3 py-2 border-b border-hairline/70 shrink-0">
+          <button
+            type="button"
+            onClick={onToggleVoiceJoined}
+            className={`flex items-center gap-1.5 h-7 px-2.5 rounded-control text-micro font-medium transition-colors ${
+              voiceJoined ? 'bg-danger/15 text-danger hover:bg-danger/25' : 'bg-accent-soft text-accent hover:bg-accent/20'
+            }`}
+          >
+            {voiceJoined ? <><PhoneOff size={12} /> Leave Voice</> : <><Mic size={12} /> Join Voice</>}
+          </button>
+          {voiceJoined && (
+            <button
+              type="button"
+              aria-label={voiceMuted ? 'Unmute microphone' : 'Mute microphone'}
+              onClick={onToggleVoiceMuted}
+              className={`w-7 h-7 flex items-center justify-center rounded-control transition-colors ${
+                voiceMuted ? 'bg-ink/10 text-ink-faint' : 'bg-success/15 text-success'
+              }`}
+            >
+              {voiceMuted ? <MicOff size={13} /> : <Mic size={13} />}
+            </button>
+          )}
         </div>
 
         <div className="flex-1 min-h-0 overflow-y-auto px-3 py-2 flex flex-col gap-1.5">

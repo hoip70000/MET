@@ -137,6 +137,8 @@ export default function App() {
   // Set by Teams' "Watch" button on a live session (see LiveSessionsSection in TeamsPanel.tsx) —
   // opens that chapter's Studio in read-only spectator mode instead of the normal edit flow.
   const [viewOnlySession, setViewOnlySession] = useState<{ sessionId: string; teamId: string } | null>(null);
+  // Set by Teams' "Go Live" button — Studio starts hosting for this team automatically on mount.
+  const [autoStartLiveSession, setAutoStartLiveSession] = useState<{ teamId: string } | null>(null);
   // Carries a `?join=<token>` invite link into the Teams tab on load, redeemed
   // (as a join request, not an auto-join) then cleared from the URL.
   const [pendingJoinToken, setPendingJoinToken] = useState<string | null>(null);
@@ -275,6 +277,7 @@ export default function App() {
     setActiveVolumeId(null);
     setActiveChapterId(null);
     setViewOnlySession(null);
+    setAutoStartLiveSession(null);
   };
 
   /** Finds which workspace/manga/volume a chapter id lives under, for jumping straight to it from
@@ -304,6 +307,20 @@ export default function App() {
     setActiveVolumeId(loc.volumeId);
     setViewOnlySession({ sessionId: session.id, teamId: session.team_id });
     setActiveChapterId(session.chapter_id);
+    setActiveNavigationTab('library');
+  };
+
+  // Teams' own "Go Live" button already picked the team and (via a chapter picker built from
+  // this same `workspaces` prop) a local chapter — this just opens that chapter's Studio, which
+  // then starts hosting automatically on mount (Studio.tsx's autoStartLiveSession effect).
+  const handleGoLiveFromTeams = (teamId: string, chapterId: string) => {
+    const loc = findChapterLocation(chapterId);
+    if (!loc) return; // Teams' own picker only offers chapters findChapterLocation can find.
+    setActiveWorkspaceId(loc.workspaceId);
+    setActiveMangaId(loc.mangaId);
+    setActiveVolumeId(loc.volumeId);
+    setActiveChapterId(chapterId);
+    setAutoStartLiveSession({ teamId });
     setActiveNavigationTab('library');
   };
 
@@ -848,6 +865,7 @@ export default function App() {
               onConsumedJoinToken={() => setPendingJoinToken(null)}
               workspaces={workspaces}
               onWatchLiveSession={handleWatchLiveSession}
+              onGoLive={handleGoLiveFromTeams}
             />
           )}
 
@@ -911,6 +929,8 @@ export default function App() {
                     setActiveNavigationTab('text-editor');
                   }}
                   viewOnlySession={viewOnlySession}
+                  autoStartLiveSession={autoStartLiveSession}
+                  onConsumeAutoStartLiveSession={() => setAutoStartLiveSession(null)}
                   onActivePageChange={setStudioActivePageId}
                 />
               )}
