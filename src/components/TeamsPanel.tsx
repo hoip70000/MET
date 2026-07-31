@@ -78,7 +78,7 @@ import { getActiveStudioSessionsForTeam, type StudioSessionRow } from '../lib/st
 
 type SectionId = 'dashboard' | 'tasks' | 'bank' | 'chat' | 'files' | 'requests' | 'roster' | 'analytics' | 'admin' | 'live';
 
-export function TeamsPanel({ cc, pendingJoinToken, onConsumedJoinToken, workspaces, onWatchLiveSession }: {
+export function TeamsPanel({ cc, pendingJoinToken, onConsumedJoinToken, workspaces, onWatchLiveSession, onGoLive }: {
   cc: CloudClient;
   pendingJoinToken?: string | null;
   onConsumedJoinToken?: () => void;
@@ -87,6 +87,8 @@ export function TeamsPanel({ cc, pendingJoinToken, onConsumedJoinToken, workspac
   workspaces: Workspace[];
   /** "Watch" on a live session — App.tsx resolves the chapter and opens Studio in viewOnly mode. */
   onWatchLiveSession: (session: StudioSessionRow) => void;
+  /** Teams' own "Go Live": picks a chapter (from `workspaces`) and starts hosting for this team. */
+  onGoLive: (teamId: string, chapterId: string) => void;
 }) {
   const { session, isAdmin } = useTeamAuth();
 
@@ -106,8 +108,8 @@ export function TeamsPanel({ cc, pendingJoinToken, onConsumedJoinToken, workspac
       <PendingOwnerTransfers />
 
       {isAdmin
-        ? <AdminTeamSection cc={cc} workspaces={workspaces} onWatchLiveSession={onWatchLiveSession} />
-        : <MemberTeamSection cc={cc} workspaces={workspaces} onWatchLiveSession={onWatchLiveSession} />}
+        ? <AdminTeamSection cc={cc} workspaces={workspaces} onWatchLiveSession={onWatchLiveSession} onGoLive={onGoLive} />
+        : <MemberTeamSection cc={cc} workspaces={workspaces} onWatchLiveSession={onWatchLiveSession} onGoLive={onGoLive} />}
     </div>
   );
 }
@@ -230,7 +232,7 @@ const SECTION_DESCRIPTIONS: Partial<Record<SectionId, string>> = {
 };
 
 function TeamWorkspace({
-  team, members, isOwner, myMember, canManage, onChanged, cc, workspaces, onWatchLiveSession,
+  team, members, isOwner, myMember, canManage, onChanged, cc, workspaces, onWatchLiveSession, onGoLive,
 }: {
   team: Team;
   members: TeamMember[];
@@ -241,6 +243,7 @@ function TeamWorkspace({
   cc: CloudClient;
   workspaces: Workspace[];
   onWatchLiveSession: (session: StudioSessionRow) => void;
+  onGoLive: (teamId: string, chapterId: string) => void;
 }) {
   const perms: Perms = {
     isOwner,
@@ -337,7 +340,7 @@ function TeamWorkspace({
       {activeSection === 'live' && (
         <div>
           <SectionHeader icon={Radio} title="Live" description={SECTION_DESCRIPTIONS.live} />
-          <LiveSessionsSection team={team} members={members} workspaces={workspaces} onWatchLiveSession={onWatchLiveSession} />
+          <LiveSessionsSection team={team} members={members} workspaces={workspaces} onWatchLiveSession={onWatchLiveSession} onGoLive={onGoLive} canManage={canManage} />
         </div>
       )}
 
@@ -1233,7 +1236,7 @@ function ReassignTasksModal({ team, fromMember, members, onClose, onDone }: {
 // Admin / Member section resolution (unchanged shape, now mounts TeamWorkspace)
 // ---------------------------------------------------------------------------
 
-function AdminTeamSection({ cc, workspaces, onWatchLiveSession }: { cc: CloudClient; workspaces: Workspace[]; onWatchLiveSession: (session: StudioSessionRow) => void }) {
+function AdminTeamSection({ cc, workspaces, onWatchLiveSession, onGoLive }: { cc: CloudClient; workspaces: Workspace[]; onWatchLiveSession: (session: StudioSessionRow) => void; onGoLive: (teamId: string, chapterId: string) => void }) {
   const { session } = useTeamAuth();
   const [loading, setLoading] = useState(true);
   const [team, setTeam] = useState<Team | null>(null);
@@ -1333,10 +1336,10 @@ function AdminTeamSection({ cc, workspaces, onWatchLiveSession }: { cc: CloudCli
     );
   }
 
-  return <TeamWorkspace team={team} members={members} isOwner myMember={null} canManage onChanged={refresh} cc={cc} workspaces={workspaces} onWatchLiveSession={onWatchLiveSession} />;
+  return <TeamWorkspace team={team} members={members} isOwner myMember={null} canManage onChanged={refresh} cc={cc} workspaces={workspaces} onWatchLiveSession={onWatchLiveSession} onGoLive={onGoLive} />;
 }
 
-function MemberTeamSection({ cc, workspaces, onWatchLiveSession }: { cc: CloudClient; workspaces: Workspace[]; onWatchLiveSession: (session: StudioSessionRow) => void }) {
+function MemberTeamSection({ cc, workspaces, onWatchLiveSession, onGoLive }: { cc: CloudClient; workspaces: Workspace[]; onWatchLiveSession: (session: StudioSessionRow) => void; onGoLive: (teamId: string, chapterId: string) => void }) {
   const [loading, setLoading] = useState(true);
   const [memberships, setMemberships] = useState<(TeamMember & { team: Team })[]>([]);
   const [membership, setMembership] = useState<(TeamMember & { team: Team }) | null>(null);
@@ -1426,6 +1429,7 @@ function MemberTeamSection({ cc, workspaces, onWatchLiveSession }: { cc: CloudCl
           cc={cc}
           workspaces={workspaces}
           onWatchLiveSession={onWatchLiveSession}
+          onGoLive={onGoLive}
         />
       </div>
     );
@@ -2908,8 +2912,27 @@ function resolveChapterLabel(chapterId: string, workspaces: Workspace[]): string
 /** Live Studio sessions this specific team is hosting right now — scoped strictly to `team.id`
  *  both by the query (getActiveStudioSessionsForTeam) and by RLS on studio_sessions itself, so
  *  switching teams (or being a member of several) never shows another team's live sessions here. */
-function LiveSessionsSection({ team, members, workspaces, onWatchLiveSession }: {
-  team: Team; members: TeamMember[]; workspaces: Workspace[]; onWatchLiveSession: (session: StudioSessionRow) => void;
+/** Every chapter across every local workspace, flattened for the Go Live picker's swal `select`
+ *  input — which only takes a flat id→label map, not a tree. */
+function flattenChaptersForPicker(workspaces: Workspace[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const ws of workspaces) {
+    for (const manga of ws.mangas) {
+      for (const volume of manga.volumes) {
+        for (const chapter of volume.chapters) {
+          out[chapter.id] = `${manga.title} — ${volume.name} — ${chapter.name}`;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+function LiveSessionsSection({ team, members, workspaces, onWatchLiveSession, onGoLive, canManage }: {
+  team: Team; members: TeamMember[]; workspaces: Workspace[];
+  onWatchLiveSession: (session: StudioSessionRow) => void;
+  onGoLive: (teamId: string, chapterId: string) => void;
+  canManage: boolean;
 }) {
   const [sessions, setSessions] = useState<StudioSessionRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -2917,21 +2940,46 @@ function LiveSessionsSection({ team, members, workspaces, onWatchLiveSession }: 
   const refresh = () => { getActiveStudioSessionsForTeam(team.id).then(setSessions).finally(() => setLoading(false)); };
   useEffect(() => { setLoading(true); refresh(); }, [team.id]);
 
+  const handleGoLive = async () => {
+    const chapterOptions = flattenChaptersForPicker(workspaces);
+    if (Object.keys(chapterOptions).length === 0) {
+      swal({ icon: 'error', title: 'No chapters', text: "You don't have any chapters in your local Library to go live with." });
+      return;
+    }
+    const r = await swal({
+      title: 'Go Live',
+      input: 'select',
+      inputOptions: chapterOptions,
+      inputPlaceholder: 'Choose a chapter',
+      showCancelButton: true,
+      confirmButtonText: 'Go Live',
+    });
+    if (!r.isConfirmed || !r.value) return;
+    onGoLive(team.id, r.value as string);
+  };
+
+  const goLiveButton = canManage && (
+    <Button size="sm" onClick={handleGoLive}><Radio size={13} /> Go Live</Button>
+  );
+
   if (loading) return <SkeletonCard className="h-32" />;
 
   if (sessions.length === 0) {
     return (
-      <GlassCard className="p-8 flex flex-col items-center text-center gap-2">
+      <GlassCard className="p-8 flex flex-col items-center text-center gap-3">
         <Radio size={24} className="text-ink-faint" />
         <p className="text-sm text-ink-muted">No one is live right now.</p>
-        <p className="text-[11px] text-ink-faint">A leader or admin can go live from a chapter's Studio.</p>
+        {canManage
+          ? goLiveButton
+          : <p className="text-[11px] text-ink-faint">A leader or admin can go live from here.</p>}
       </GlassCard>
     );
   }
 
   return (
     <div className="space-y-2">
-      <div className="flex justify-end">
+      <div className="flex justify-end gap-2">
+        {goLiveButton}
         <Button size="sm" variant="secondary" onClick={refresh}><RefreshCw size={13} /> Refresh</Button>
       </div>
       {sessions.map((s) => {

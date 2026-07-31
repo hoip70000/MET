@@ -59,9 +59,10 @@ import { callMagicErase, MagicEraseError } from '../../lib/magicErase';
 import { loadMagicEraseServer } from '../../lib/magicEraseStore';
 import { supabase } from '../../lib/supabaseClient';
 import {
-  startStudioSession, endStudioSession, listHostableTeams, joinStudioSessionChannel,
+  startStudioSession, endStudioSession, joinStudioSessionChannel,
   type StudioCollabPeer, type StudioSessionRow, type StudioCollabHandle,
 } from '../../lib/studioCollab';
+import { useStudioVoiceChat } from './useStudioVoiceChat';
 import { CollabCursors } from './CollabCursors';
 import { CollabViewerCanvas } from './CollabViewerCanvas';
 import { CollabSessionPanel, type CollabChatMessage } from './CollabSessionPanel';
@@ -92,6 +93,10 @@ interface StudioProps {
    *  "Live" badge) rather than a normal editing session — renders a read-only viewer shell instead
    *  of the full edit UI, and never mounts the real Konva StudioCanvas at all. */
   viewOnlySession?: { sessionId: string; teamId: string } | null;
+  /** Set when this mount was opened via Teams' "Go Live" button (which already picked the team and
+   *  chapter) — Studio starts hosting automatically instead of the user needing a second click. */
+  autoStartLiveSession?: { teamId: string } | null;
+  onConsumeAutoStartLiveSession?: () => void;
   /** Reports the active page id up to App.tsx on every change — lets the standalone Text Editor's
    *  split-screen page preview follow along live even though it's a completely separate top-level
    *  tab with no other visibility into Studio's internal state. */
@@ -110,7 +115,7 @@ export function Studio(props: StudioProps) {
   );
 }
 
-function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript, onConsumePendingTyperScript, onPagesChange, onExportMsp, onOpenTextEditor, viewOnlySession, onActivePageChange }: StudioProps) {
+function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript, onConsumePendingTyperScript, onPagesChange, onExportMsp, onOpenTextEditor, viewOnlySession, onActivePageChange, autoStartLiveSession, onConsumeAutoStartLiveSession }: StudioProps) {
   const canvasRef = useRef<StudioCanvasHandle>(null);
 
   // Live collab (spectator mode) — a hosted session for this chapter, joined either as the host
@@ -126,6 +131,19 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
   const [goingLive, setGoingLive] = useState(false);
   const collabHandleRef = useRef<StudioCollabHandle | null>(null);
   const isHostingLive = !!liveSession && !viewOnlySession;
+  const voice = useStudioVoiceChat({
+    collabHandleRef,
+    selfUserId: collabSelf?.id ?? null,
+    peerUserIds: collabPeers.filter(p => p.userId !== collabSelf?.id).map(p => p.userId),
+  });
+  // The channel's voice-signal handlers are registered once per session (see the two
+  // joinStudioSessionChannel calls below) and never re-subscribed just because `voice`'s own
+  // handler functions got new identities (e.g. `joined` flipping) — routing through a ref that
+  // always points at the latest versions is what keeps signaling working after the mesh's own
+  // state changes mid-session, mirroring the same stale-closure fix TeamsPanel's hydrateSender
+  // needed for realtime chat messages.
+  const voiceRef = useRef(voice);
+  useEffect(() => { voiceRef.current = voice; }, [voice]);
   const panelLayout = usePanelLayout();
 
   useEffect(() => {
@@ -152,6 +170,9 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
           swalToast({ icon: 'info', title: 'The host ended this live session' });
           onBack();
         },
+        onVoiceOffer: (from, sdp) => voiceRef.current.handleOffer(from, sdp),
+        onVoiceAnswer: (from, sdp) => voiceRef.current.handleAnswer(from, sdp),
+        onVoiceIce: (from, candidate) => voiceRef.current.handleIce(from, candidate),
       },
     );
     collabHandleRef.current = handle;
@@ -159,28 +180,14 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewOnlySession?.sessionId, collabSelf?.id]);
 
-  const handleGoLive = useCallback(async () => {
-    if (!collabSelf || goingLive) return;
+  // Core "start hosting" logic, with the team already decided — Go Live is now initiated from
+  // Teams' own Live section (which already knows which team it's in), not from inside Studio, so
+  // there's no team picker here anymore. self is passed explicitly rather than read from
+  // `collabSelf` closure state, since the auto-start effect below fires the instant collabSelf
+  // resolves and can't rely on a stale closure capturing it as still-null.
+  const startHostingForTeam = useCallback(async (teamId: string, self: { id: string; name: string }) => {
     setGoingLive(true);
     try {
-      const teams = await listHostableTeams();
-      if (teams.length === 0) {
-        swalToast({ icon: 'error', title: 'You need to be a team leader (or admin) to go live' });
-        return;
-      }
-      let teamId = teams[0].id;
-      if (teams.length > 1) {
-        const r = await swal({
-          title: 'Go Live',
-          input: 'select',
-          inputOptions: Object.fromEntries(teams.map(t => [t.id, t.name])),
-          inputPlaceholder: 'Choose a team',
-          showCancelButton: true,
-          confirmButtonText: 'Go Live',
-        });
-        if (!r.isConfirmed || !r.value) return;
-        teamId = r.value as string;
-      }
       const { session, error } = await startStudioSession(teamId, chapterId);
       if (!session) {
         swalToast({ icon: 'error', title: error || 'Could not start the live session' });
@@ -190,18 +197,32 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
       panelLayout.reveal('collab');
       const handle = joinStudioSessionChannel(
         session.id,
-        { userId: collabSelf.id, name: collabSelf.name, isHost: true },
+        { userId: self.id, name: self.name, isHost: true },
         {
           onPeers: setCollabPeers,
           onCursor: (userId, name, x, y) => setCollabCursors(prev => ({ ...prev, [userId]: { name, x, y } })),
           onChat: (userId, name, text, at) => setCollabMessages(prev => [...prev, { userId, name, text, at }]),
+          onVoiceOffer: (from, sdp) => voiceRef.current.handleOffer(from, sdp),
+          onVoiceAnswer: (from, sdp) => voiceRef.current.handleAnswer(from, sdp),
+          onVoiceIce: (from, candidate) => voiceRef.current.handleIce(from, candidate),
         },
       );
       collabHandleRef.current = handle;
     } finally {
       setGoingLive(false);
     }
-  }, [collabSelf, goingLive, chapterId, panelLayout]);
+  }, [chapterId, panelLayout]);
+
+  // Arriving here via Teams' "Go Live" button (App.tsx's autoStartLiveSession) — starts hosting
+  // automatically the moment both this chapter's Studio has mounted and the user's own identity
+  // has resolved, instead of requiring a second click once already inside Studio.
+  const autoStartedRef = useRef(false);
+  useEffect(() => {
+    if (!autoStartLiveSession || !collabSelf || autoStartedRef.current || liveSession) return;
+    autoStartedRef.current = true;
+    startHostingForTeam(autoStartLiveSession.teamId, collabSelf);
+    onConsumeAutoStartLiveSession?.();
+  }, [autoStartLiveSession, collabSelf, liveSession, startHostingForTeam, onConsumeAutoStartLiveSession]);
 
   const handleEndLive = useCallback(() => {
     if (!liveSession) return;
@@ -2138,6 +2159,11 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
       messages={collabMessages}
       selfUserId={collabSelf?.id ?? ''}
       onSend={(text) => collabHandleRef.current?.sendChat(text)}
+      speakingUserIds={voice.speakingUserIds}
+      voiceJoined={voice.joined}
+      voiceMuted={voice.muted}
+      onToggleVoiceJoined={voice.toggleJoined}
+      onToggleVoiceMuted={voice.toggleMuted}
       hideTitle
     />
   );
@@ -2486,7 +2512,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
         isLive={isHostingLive}
         goingLive={goingLive}
         liveViewerCount={Math.max(0, collabPeers.length - 1)}
-        onToggleLive={isHostingLive ? handleEndLive : handleGoLive}
+        onToggleLive={isHostingLive ? handleEndLive : undefined}
         onOpenTextEditor={onOpenTextEditor}
       />
 

@@ -113,18 +113,22 @@ export function StudioToolbar({
       </div>
       <div className="flex-1 lg:hidden" />
 
-      {onToggleLive && (
+      {/* Go Live is initiated from Teams' own Live section now (it already knows which team), not
+          from here — this only ever shows a status: "Starting…" while a Teams-initiated session
+          is spinning up, then a live/viewer-count pill the host can click to end. Never a plain
+          idle "Go Live" button. */}
+      {(isLive || goingLive) && (
         <button
           type="button"
           onClick={onToggleLive}
-          disabled={goingLive}
+          disabled={!isLive}
           className={`shrink-0 flex items-center gap-1.5 h-8 px-2.5 rounded-control border text-ui font-medium transition-colors disabled:opacity-50 ${
-            isLive ? 'bg-danger/15 border-danger/40 text-danger hover:bg-danger/25' : 'bg-ink/5 border-hairline text-ink hover:bg-ink/10'
+            isLive ? 'bg-danger/15 border-danger/40 text-danger hover:bg-danger/25' : 'bg-ink/5 border-hairline text-ink'
           }`}
-          title={isLive ? 'End the live session' : 'Go live — team members can watch and chat'}
+          title={isLive ? 'End the live session' : 'Starting the live session…'}
         >
           <Radio size={13} className={isLive ? 'animate-pulse' : ''} />
-          <span className="hidden sm:inline">{isLive ? 'Live' : goingLive ? 'Starting…' : 'Go Live'}</span>
+          <span className="hidden sm:inline">{isLive ? 'Live' : 'Starting…'}</span>
           {isLive && liveViewerCount > 0 && (
             <span className="flex items-center gap-0.5 text-micro"><Users size={11} />{liveViewerCount}</span>
           )}

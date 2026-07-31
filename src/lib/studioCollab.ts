@@ -110,6 +110,13 @@ export interface StudioCollabHandlers {
   onChat?: (fromUserId: string, name: string, text: string, at: number) => void;
   /** The host closed Studio or lost the connection — viewers should be kicked back to the Library. */
   onEnded?: () => void;
+  /** WebRTC mesh voice chat signaling — see useStudioVoiceChat.ts, which is the only consumer of
+   *  these three. Each carries `toUserId` in its payload so only the intended peer acts on it;
+   *  everyone else's client just ignores it (cheap — Realtime broadcast fans out to the whole
+   *  channel regardless, there's no way to address one participant server-side). */
+  onVoiceOffer?: (fromUserId: string, sdp: RTCSessionDescriptionInit) => void;
+  onVoiceAnswer?: (fromUserId: string, sdp: RTCSessionDescriptionInit) => void;
+  onVoiceIce?: (fromUserId: string, candidate: RTCIceCandidateInit) => void;
 }
 
 export interface StudioCollabHandle {
@@ -118,6 +125,9 @@ export interface StudioCollabHandle {
   sendChat: (text: string) => void;
   /** Host-only: tells every viewer the session is over, ahead of/independent from the DB update. */
   announceEnded: () => void;
+  sendVoiceOffer: (toUserId: string, sdp: RTCSessionDescriptionInit) => void;
+  sendVoiceAnswer: (toUserId: string, sdp: RTCSessionDescriptionInit) => void;
+  sendVoiceIce: (toUserId: string, candidate: RTCIceCandidateInit) => void;
   leave: () => void;
 }
 
@@ -151,6 +161,15 @@ export function joinStudioSessionChannel(
     .on('broadcast', { event: 'ended' }, () => {
       handlers.onEnded?.();
     })
+    .on('broadcast', { event: 'voice-offer' }, ({ payload }) => {
+      if (payload.toUserId === self.userId) handlers.onVoiceOffer?.(payload.fromUserId, payload.sdp);
+    })
+    .on('broadcast', { event: 'voice-answer' }, ({ payload }) => {
+      if (payload.toUserId === self.userId) handlers.onVoiceAnswer?.(payload.fromUserId, payload.sdp);
+    })
+    .on('broadcast', { event: 'voice-ice' }, ({ payload }) => {
+      if (payload.toUserId === self.userId) handlers.onVoiceIce?.(payload.fromUserId, payload.candidate);
+    })
     .subscribe(async (status) => {
       if (status === 'SUBSCRIBED') {
         await channel.track({ name: self.name, isHost: self.isHost });
@@ -162,6 +181,9 @@ export function joinStudioSessionChannel(
     broadcastCursor: (x, y) => { channel.send({ type: 'broadcast', event: 'cursor', payload: { userId: self.userId, name: self.name, x, y } }); },
     sendChat: (text) => { channel.send({ type: 'broadcast', event: 'chat', payload: { userId: self.userId, name: self.name, text, at: Date.now() } }); },
     announceEnded: () => { channel.send({ type: 'broadcast', event: 'ended', payload: {} }); },
+    sendVoiceOffer: (toUserId, sdp) => { channel.send({ type: 'broadcast', event: 'voice-offer', payload: { fromUserId: self.userId, toUserId, sdp } }); },
+    sendVoiceAnswer: (toUserId, sdp) => { channel.send({ type: 'broadcast', event: 'voice-answer', payload: { fromUserId: self.userId, toUserId, sdp } }); },
+    sendVoiceIce: (toUserId, candidate) => { channel.send({ type: 'broadcast', event: 'voice-ice', payload: { fromUserId: self.userId, toUserId, candidate } }); },
     leave: () => { supabase.removeChannel(channel); },
   };
 }
