@@ -3,7 +3,9 @@ export interface LoadedFont {
   dataUrl: string;
 }
 
-function readFileAsDataUrl(file: File): Promise<string> {
+/** A generic file-to-data-URL reader — lives here since font loading was its first user, but
+ *  has no font-specific logic in it (the Text Editor's image insert reuses it verbatim). */
+export function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(reader.result as string);

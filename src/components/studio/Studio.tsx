@@ -89,6 +89,10 @@ interface StudioProps {
    *  "Live" badge) rather than a normal editing session — renders a read-only viewer shell instead
    *  of the full edit UI, and never mounts the real Konva StudioCanvas at all. */
   viewOnlySession?: { sessionId: string; teamId: string } | null;
+  /** Reports the active page id up to App.tsx on every change — lets the standalone Text Editor's
+   *  split-screen page preview follow along live even though it's a completely separate top-level
+   *  tab with no other visibility into Studio's internal state. */
+  onActivePageChange?: (pageId: string | null) => void;
 }
 
 export function Studio(props: StudioProps) {
@@ -103,7 +107,7 @@ export function Studio(props: StudioProps) {
   );
 }
 
-function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript, onConsumePendingTyperScript, onPagesChange, onExportMsp, viewOnlySession }: StudioProps) {
+function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript, onConsumePendingTyperScript, onPagesChange, onExportMsp, viewOnlySession, onActivePageChange }: StudioProps) {
   const canvasRef = useRef<StudioCanvasHandle>(null);
 
   // Live collab (spectator mode) — a hosted session for this chapter, joined either as the host
@@ -409,8 +413,10 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     onToggleGrid: () => setShowGrid(v => !v),
     onNewLayer: () => handleAddLayer(),
     onMergeVisible: () => handleMergeVisible(),
+    onToggleMultiBubble: () => setMultiBubbleMode(!multiBubbleMode),
   });
   const [activePageId, setActivePageId] = useState<string | null>(pages[0]?.id ?? null);
+  useEffect(() => { onActivePageChange?.(activePageId); }, [activePageId, onActivePageChange]);
 
   // Host broadcast loop: a throttled, downscaled flattened snapshot of the active page — not a
   // layer/diff replication model (see "Live collaborative Studio" in CLAUDE.md). Viewers never
@@ -452,10 +458,53 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
   // Left (Pages) / right (Tools) sidebar visibility. Desktop keeps both open as fixed columns by
   // default; tablet/phone treat these as slide-out sheets, so opening one there closes the other
   // to avoid covering the whole canvas.
-  const [leftOpen, setLeftOpen] = useState(true);
-  const [rightOpen, setRightOpen] = useState(true);
+  //
+  // Investigation notes (tool-rail-overlapping-canvas bug, this pass):
+  // 1. Studio shell layout: the body below the toolbar is `<div className="flex-1 flex min-h-0
+  //    relative">` (~line 2166) — a real flexbox row, not absolute/grid-based. Its children in DOM
+  //    order are: left Pages panel (desktop only) -> canvas (`flex-1 min-h-0 min-w-0 relative`,
+  //    always present) -> right Tools sidebar (desktop only) -> tablet-only left/right drawers and
+  //    a tablet-only permanent rail column -> phone-only bottom sheets.
+  // 2. `ToolRail.tsx` itself (vertical orientation) is `w-12 shrink-0` with no `position` override
+  //    at all — a plain flex child. At every breakpoint it's rendered as a genuine, non-overlapping
+  //    flex sibling of the canvas (desktop: inside the right sidebar's own `h-full shrink-0
+  //    relative z-30` wrapper at ~line 2181; tablet: its own `h-full shrink-0 relative z-30 pr-12`
+  //    wrapper at ~line 2208), never `position: absolute`/`fixed`, and never nested inside the
+  //    canvas's own container.
+  // 3. `StudioCanvas.tsx`'s root is `relative w-full h-full overflow-hidden` (not absolute/fixed),
+  //    sized via a `ResizeObserver` on that same element — it fills whatever width its flex parent
+  //    actually gives it, and reacts correctly when a sibling's width changes.
+  // 4. Confirmed: this app's actual, intentional column order is `Pages (left) | Canvas (center) |
+  //    Tools (right)` (an explicit comment at ~line 2163 predates this pass) — the tool rail sits
+  //    immediately right of the canvas, adjacent to the Color/Layers panel stack, not on the left.
+  //    Per explicit confirmation this session, that side is correct and unchanged by this fix.
+  // 5. z-index (`z-20`/`z-30`) only matters among elements that already occupy overlapping boxes;
+  //    since the rail and canvas are genuine flex siblings with non-overlapping boxes, z-index was
+  //    never the actual mechanism here — consistent with the prior attempt's own reasoning.
+  //
+  // The real remaining bug: `leftOpen`/`rightOpen` unconditionally defaulted to `true` regardless
+  // of viewport. That default is correct semantics for desktop, where both render as permanent
+  // flex columns — but at tablet/phone widths, `leftOpen`/`rightOpen` instead gate `position:
+  // absolute` overlay *drawers* (~line 2186 and ~line 2212) that float on top of the canvas by
+  // design (that's how a slide-out sheet is supposed to work while genuinely open). Defaulting both
+  // to `true` meant that on first load — or on entering a chapter — at tablet/phone width, *both*
+  // overlay drawers rendered open simultaneously, immediately covering the canvas from both sides
+  // at once, with only a thin sliver of actual page visible between them (and, at phone width, the
+  // tool rail itself lives inside that same right-hand overlay sheet, so it visually reads as "tool
+  // icons on top of the page"). `toggleLeftSidebar`/`toggleRightSidebar` already correctly close the
+  // opposite side on non-desktop *once the user interacts* — the gap was purely the initial default
+  // never accounting for `layoutMode` at all. Fixed below by deriving the initial value from the
+  // same `(min-width: 1024px)` check `layoutMode`'s own initializer already uses, rather than a
+  // bare `true` — both drawers now start closed on tablet/phone and open as permanent columns on
+  // desktop, matching what was already the intended, documented behavior for each breakpoint.
+  const [leftOpen, setLeftOpen] = useState(() => typeof window === 'undefined' || window.matchMedia('(min-width: 1024px)').matches);
+  const [rightOpen, setRightOpen] = useState(() => typeof window === 'undefined' || window.matchMedia('(min-width: 1024px)').matches);
   const leftSidebarRef = useRef<HTMLDivElement>(null);
   const rightSidebarRef = useRef<HTMLDivElement>(null);
+  // Tablet keeps the tool rail itself docked as a permanent, non-overlapping column (see the
+  // tablet-layout block below) — only the wider panel drawer slides over the canvas as an overlay.
+  // Outside-pointerdown-closes-the-drawer logic must not treat a click on the rail as "outside".
+  const rightRailRef = useRef<HTMLDivElement>(null);
 
   function toggleLeftSidebar() {
     setLeftOpen(v => {
@@ -589,9 +638,17 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     setTyperCurrentFolderId(typerLines[typerIndex]?.style.folderId ?? null);
   }, [typerIndex, typerLines]);
   // Multi-Bubble mode: draw a rect per bubble (Rectangular Marquee) and queue it instead of
-  // placing immediately, then place every queued rect's line in one go, in script order.
+  // placing immediately, then place every queued rect's line in one go, in script order. Each
+  // capture snapshots the script line it was drawn against (not just the rect), so switching to a
+  // different line — via the panel's own jump-to-line click — between two captures sticks: Place
+  // All replays each capture's own line/style rather than re-deriving position from sequential
+  // order at fill time.
   const [multiBubbleMode, setMultiBubbleModeState] = useState(false);
-  const [multiBubbleRects, setMultiBubbleRects] = useState<{ x: number; y: number; width: number; height: number }[]>([]);
+  const [multiBubbleRects, setMultiBubbleRects] = useState<{ rect: { x: number; y: number; width: number; height: number }; lineIndex: number }[]>([]);
+  // Script-line indices already stamped onto the canvas (single-click placement or a multi-bubble
+  // fill) — drives the line list's ✓ badge. Not persisted (mirrors typerIndex's own current
+  // session-only behaviour); cleared whenever the script itself changes or progress is reset.
+  const [typerPlacedIndices, setTyperPlacedIndices] = useState<Set<number>>(new Set());
 
   function setMultiBubbleMode(enabled: boolean) {
     setMultiBubbleModeState(enabled);
@@ -604,17 +661,44 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
       swalToast({ icon: 'info', title: 'Draw a rectangle around a bubble first' });
       return;
     }
-    setMultiBubbleRects(prev => [...prev, selection]);
+    if (!typerLines[typerIndex]) {
+      swalToast({ icon: 'info', title: 'No more lines to capture' });
+      return;
+    }
+    setMultiBubbleRects(prev => [...prev, { rect: selection, lineIndex: typerIndex }]);
     setSelection(NO_SELECTION);
+    // Auto-advance, same as a single armed canvas click — lets the user jump to a different line
+    // in the panel before drawing the *next* bubble, which is what lets each capture carry its own
+    // style rather than every queued bubble inheriting whatever line was active at Place-All time.
+    setTyperIndex(typerIndex + 1);
+  }
+
+  function handleRemoveLastBubbleRect() {
+    setMultiBubbleRects(prev => prev.slice(0, -1));
+  }
+
+  function handleClearAllBubbleRects() {
+    setMultiBubbleRects([]);
   }
 
   function handlePlaceAllBubbles() {
     if (multiBubbleRects.length === 0) return;
     const newLayers: StudioLayer[] = [];
-    let idx = typerIndex;
-    for (const rect of multiBubbleRects) {
-      const line = typerLines[idx];
-      if (!line) break;
+    const placedNow: number[] = [];
+    let pageBoundaryHint: string | undefined;
+
+    for (const capture of multiBubbleRects) {
+      const line = typerLines[capture.lineIndex];
+      if (!line) continue;
+      // A captured line tagged with a page hint means the script expects a page switch before it —
+      // its rect was drawn on the page that was active *then*, so placing it after switching would
+      // land it in the wrong spot. Stop before it, switch pages, and drop the rest of the queue,
+      // matching the real extension's "reaching a Page N marker stops the fill" behaviour.
+      if (line.pageHint) {
+        pageBoundaryHint = line.pageHint;
+        break;
+      }
+      const { rect } = capture;
       const { content, style, boldOverride, italicOverride } = line;
       const lineCount = content.split('\n').length || 1;
       const textWidth = Math.max(40, Math.min(rect.width, 400));
@@ -634,11 +718,34 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
         strokeWidth: style.strokeWidth,
       };
       newLayers.push(layer);
-      idx += 1;
+      placedNow.push(capture.lineIndex);
     }
-    updateLayers(current => [...current, ...newLayers], 'Place TypeR Multi-Bubble');
-    setTyperIndex(idx);
-    if (idx >= typerLines.length) setTyperArmed(false);
+
+    if (newLayers.length > 0) {
+      updateLayers(current => [...current, ...newLayers], 'Place TypeR Multi-Bubble');
+      setTyperPlacedIndices(prev => {
+        const next = new Set(prev);
+        placedNow.forEach(i => next.add(i));
+        return next;
+      });
+    }
+
+    if (pageBoundaryHint) {
+      const wantNumber = Number(pageBoundaryHint);
+      const target = pages.find(p => {
+        const match = p.original.filename.match(/(\d+)(?!.*\d)/);
+        return match && Number(match[1]) === wantNumber;
+      }) ?? pages[wantNumber - 1];
+      if (target) setActivePageId(target.id);
+      setMultiBubbleRects([]);
+      setActiveTool('select');
+      swalToast({ icon: 'info', title: `Placed ${newLayers.length}, stopped at Page ${pageBoundaryHint}` });
+      return;
+    }
+
+    const nextIndex = placedNow.length > 0 ? Math.max(...placedNow) + 1 : typerIndex;
+    setTyperIndex(nextIndex);
+    if (nextIndex >= typerLines.length) setTyperArmed(false);
     setMultiBubbleRects([]);
     setActiveTool('select');
     swalToast({ icon: 'success', title: `Placed ${newLayers.length} line${newLayers.length === 1 ? '' : 's'}` });
@@ -944,10 +1051,11 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     const layer = createLayer('clean-patch', `Layer ${flattenTree(layers).length}`);
     updateLayers(current => [...current, layer], 'Add Layer');
     setActiveLayerId(layer.id);
-    // New raster layers start as a working copy of the background — matches the standard
-    // "duplicate scan, clean the duplicate" manga workflow and gives clone/heal/filter-brush/
-    // liquify tools real pixels to act on immediately instead of an empty transparent canvas.
-    canvasRef.current?.seedLayerWithBackground(layer.id);
+    // New layers must start fully transparent — no background copy. A previous version of this
+    // function seeded new layers with the background image (see git history / CLAUDE.md), which
+    // silently defeated painting since new strokes were invisible against identical backing
+    // pixels. assertLayerBlank is a permanent regression tripwire against that ever coming back.
+    canvasRef.current?.assertLayerBlank(layer.id);
   }
 
   /** The explicit "I want a truly empty layer" action, alongside handleAddLayer's default
@@ -1451,6 +1559,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
       };
       updateLayers(current => [...current, layer], 'Place TypeR Line');
       setActiveLayerId(layer.id);
+      setTyperPlacedIndices(prev => new Set(prev).add(typerIndex));
       const nextIndex = typerIndex + 1;
       setTyperIndex(nextIndex);
       if (nextIndex >= typerLines.length) setTyperArmed(false);
@@ -1519,6 +1628,32 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
 
   function handleCenterTextLayer(id: string) {
     canvasRef.current?.centerTextLayerInBubble(id);
+  }
+
+  /** Layers panel's right-click Convert to Point/Area Text. */
+  function handleConvertTextMode(id: string, toAutoWidth: boolean) {
+    const layer = findLayer(layers, id);
+    if (!layer || layer.type !== 'text' || !layer.text) return;
+    if (toAutoWidth) {
+      // Area -> Point: the frame goes away. `width` is left as-is rather than cleared — a point
+      // layer keeps a usable width if it's later converted back to area (TextLayerData.autoWidth's
+      // own doc comment). `fixedHeight` is meaningless for point text, so it's cleared rather than
+      // left stale for a later area conversion to inherit unexpectedly.
+      updateLayers(current => updateLayer(current, id, l =>
+        l.type === 'text' && l.text ? { ...l, text: { ...l.text, autoWidth: true, fixedHeight: undefined } } : l
+      ), 'Convert to Point Text');
+    } else {
+      // Point -> Area: seed the new frame from the text's current natural size — the same
+      // `layoutText({ ...text, autoWidth: true })` call StudioCanvas.tsx's own auto-fit-width
+      // double-click already uses — so the box starts exactly where the type currently sits on
+      // screen instead of jumping to some default size.
+      const natural = layoutText({ ...layer.text, autoWidth: true });
+      updateLayers(current => updateLayer(current, id, l =>
+        l.type === 'text' && l.text
+          ? { ...l, text: { ...l.text, autoWidth: false, width: natural.width, fixedHeight: natural.height } }
+          : l
+      ), 'Convert to Area Text');
+    }
   }
 
   /**
@@ -1808,8 +1943,10 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     if (activeLayer.type === 'clean-patch') return;
     // flattenTree, not the raw root array — a clean-patch layer nested inside a group is otherwise
     // invisible to this scan, so painting while a group holding one is active/collapsed would
-    // create a redundant new layer instead of reusing the one that already exists.
-    const existing = [...flattenTree(layers)].reverse().find(l => l.type === 'clean-patch');
+    // create a redundant new layer instead of reusing the one that already exists. Locked layers
+    // are excluded too — reusing one would just hand the user a target they can't actually paint
+    // on, tripping the "Select a layer to paint on" guard the moment they try.
+    const existing = [...flattenTree(layers)].reverse().find(l => l.type === 'clean-patch' && !l.locked);
     if (existing) {
       setActiveLayerId(existing.id);
     } else {
@@ -1857,6 +1994,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
       activeMaskLayerId={activeMaskLayerId}
       expandedLayerId={expandedLayerId}
       onToggleExpanded={(id) => setExpandedLayerId(current => (current === id ? null : id))}
+      onConvertTextMode={handleConvertTextMode}
       hideTitle
     />
   );
@@ -1909,7 +2047,10 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
   // copy-pasted prop list could quietly drift between the two.
   const typerPanelProps = {
     script: typerScript,
-    onScriptChange: setTyperScript,
+    // Line indices no longer correspond to the same content once the script text itself changes,
+    // so a fresh script means a fresh placed-line history (the underlying layers already placed
+    // stay on the canvas either way — this only clears the ✓ bookkeeping).
+    onScriptChange: (script: string) => { setTyperScript(script); setTyperPlacedIndices(new Set()); },
     styles: typerStyles,
     onStylesChange: setTyperStyles,
     folders: typerFolders,
@@ -1934,6 +2075,9 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     queuedBubbleCount: multiBubbleRects.length,
     onAddBubbleRect: handleAddBubbleRect,
     onPlaceAllBubbles: handlePlaceAllBubbles,
+    onRemoveLastBubble: handleRemoveLastBubbleRect,
+    onClearAllBubbles: handleClearAllBubbleRects,
+    placedIndices: typerPlacedIndices,
   };
 
   const typerPanel = typerFloating ? (
@@ -2179,7 +2323,12 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     if (isDesktop) return;
     function onPointerDown(e: PointerEvent) {
       if (leftOpen && leftSidebarRef.current && !leftSidebarRef.current.contains(e.target as Node)) setLeftOpen(false);
-      if (rightOpen && rightSidebarRef.current && !rightSidebarRef.current.contains(e.target as Node)) setRightOpen(false);
+      if (
+        rightOpen &&
+        rightSidebarRef.current &&
+        !rightSidebarRef.current.contains(e.target as Node) &&
+        !rightRailRef.current?.contains(e.target as Node)
+      ) setRightOpen(false);
     }
     window.addEventListener('pointerdown', onPointerDown);
     return () => window.removeEventListener('pointerdown', onPointerDown);
@@ -2227,7 +2376,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
       onPaintStrokeEnd={handlePaintStrokeEnd}
       onEyedropperPick={setForeground}
       onCommitCrop={handleCommitCrop}
-      queuedBubbleRects={multiBubbleRects}
+      queuedBubbleRects={multiBubbleRects.map(c => c.rect)}
       queuedSliceRects={sliceRects}
       transformingSelection={transformingSelection}
       onExitTransformSelection={() => setTransformingSelection(false)}
@@ -2404,9 +2553,30 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
             <StudioPagesPanel pages={pages} activePageId={activePageId} onSelect={setActivePageId} orientation="vertical" onManagePages={() => setPagesManagerOpen(true)} />
           </div>
         )}
+        {/* Tablet: the tool rail stays a permanent, non-overlapping column (matching desktop)
+            instead of riding along inside the panel drawer's slide-over overlay — the rail is a
+            handful of narrow icon buttons, not the space-hungry part, so there's no reason for it
+            to ever sit on top of the canvas. Only the wider panel stack (Color/Layers/etc.) still
+            slides over the canvas as a drawer at this breakpoint, anchored flush against the rail
+            (`right-12` = the rail's own w-12) rather than the container's true right edge, so it
+            doesn't overlap the rail either.
+            `pr-12` reserves one more rail-width of empty space past the rail's true edge: a
+            tool-group flyout (`ToolFlyout.tsx`) opens flush to the right of a vertical rail and,
+            by design, is only ever nudged back on-screen *vertically* — never flipped or shifted
+            horizontally, since "which side it opens on" is fixed. That's safe as long as the rail
+            always has room to its right, which it always did before (the rail shared the same
+            overlay as the panel drawer); docking it as its own column right at the container's
+            edge would silently strand every flyout past the viewport's right edge with nothing to
+            recover it. The reserved gap gives it exactly that room back without touching
+            ToolFlyout's own positioning logic. */}
+        {!panelsHidden && layoutMode === 'tablet' && (
+          <div ref={rightRailRef} className="h-full shrink-0 relative z-30 pr-12">
+            {toolRailVisible && <ToolRail activeTool={activeTool} onToolChange={setActiveTool} orientation="vertical" />}
+          </div>
+        )}
         {!panelsHidden && layoutMode === 'tablet' && rightOpen && (
-          <div ref={rightSidebarRef} className="absolute inset-y-0 right-0 z-20 h-full liquid-glass-heavy border-l border-hairline shadow-2xl">
-            {toolsSidebar}
+          <div ref={rightSidebarRef} className="absolute inset-y-0 right-12 z-20 w-64 sm:w-72 h-full liquid-glass-heavy border-l border-hairline shadow-2xl">
+            <PanelStack panels={panelStackEntries} />
           </div>
         )}
 

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Target, RotateCcw, Plus, Trash2, Copy, Download, Upload, Layers as LayersIcon, Pencil, Check, FolderPlus, Wand2, Play, Maximize2 } from 'lucide-react';
+import { Target, RotateCcw, Plus, Trash2, Copy, Download, Upload, Layers as LayersIcon, Pencil, Check, FolderPlus, Wand2, Play, Maximize2, Eye, EyeOff, FolderDown, Minus } from 'lucide-react';
 import { Textarea, IconButton } from '../ui';
 import { cn } from '../ui/cn';
 import { swal, swalToast } from '../../lib/swalTheme';
@@ -41,6 +41,14 @@ export interface TyperPanelProps {
   queuedBubbleCount: number;
   onAddBubbleRect: () => void;
   onPlaceAllBubbles: () => void;
+  /** Removes the most recently queued bubble capture (LIFO, one at a time). */
+  onRemoveLastBubble: () => void;
+  /** Removes every queued bubble capture at once — wired to a 2s-hold gesture on the same button
+   *  that does the one-at-a-time removal, not a separate control. */
+  onClearAllBubbles: () => void;
+  /** Script-line indices already placed onto the canvas — drives the ✓ badge in the line list.
+   *  Cleared by the caller on script change / Reset progress, not owned by this panel. */
+  placedIndices: ReadonlySet<number>;
   /** Pops this panel out into its own floating window (Studio.tsx's TyperFloatingWindow). Omitted
    *  when this instance is already the floating one, or in any standalone/test usage — the button
    *  simply doesn't render without it. */
@@ -62,11 +70,42 @@ export function TyperPanel({
   index, onIndexChange, armed, onArmedChange,
   fontFamilies = FONT_FAMILIES,
   multiBubbleMode, onMultiBubbleModeChange, queuedBubbleCount, onAddBubbleRect, onPlaceAllBubbles,
+  onRemoveLastBubble, onClearAllBubbles, placedIndices,
   onPopOut, hideTitle,
 }: TyperPanelProps) {
   const [editingStyleId, setEditingStyleId] = useState<string | null>(null);
   const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
+  // Hold-to-clear-all on the "-" bubble-remove button: a quick press/release removes one (LIFO); a
+  // continuous hold past 2s clears the whole queue instead, with a red warning after 1s so the user
+  // sees it coming before it fires. Cancelled (no removal at all) if the pointer leaves the button.
+  const removeHoldTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const removeWarnTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const removeClearedByHoldRef = useRef(false);
+  const [removeHoldWarning, setRemoveHoldWarning] = useState(false);
+
+  function clearRemoveHoldTimers() {
+    if (removeHoldTimerRef.current !== null) { clearTimeout(removeHoldTimerRef.current); removeHoldTimerRef.current = null; }
+    if (removeWarnTimerRef.current !== null) { clearTimeout(removeWarnTimerRef.current); removeWarnTimerRef.current = null; }
+    setRemoveHoldWarning(false);
+  }
+  function onRemovePointerDown() {
+    removeClearedByHoldRef.current = false;
+    removeWarnTimerRef.current = setTimeout(() => setRemoveHoldWarning(true), 1000);
+    removeHoldTimerRef.current = setTimeout(() => {
+      removeClearedByHoldRef.current = true;
+      clearRemoveHoldTimers();
+      onClearAllBubbles();
+    }, 2000);
+  }
+  function onRemovePointerUp() {
+    const heldToClear = removeClearedByHoldRef.current;
+    clearRemoveHoldTimers();
+    if (!heldToClear) onRemoveLastBubble();
+  }
+  function onRemovePointerLeave() {
+    clearRemoveHoldTimers();
+  }
   const lines = useMemo(() => parseTyperScript(script, styles, { folders, ignoreLinePrefixes, ignoreTags, defaultStyleId }), [script, styles, folders, ignoreLinePrefixes, ignoreTags, defaultStyleId]);
   const current = lines[index] ?? null;
   const done = lines.length > 0 && index >= lines.length;
@@ -132,6 +171,41 @@ export function TyperPanel({
     URL.revokeObjectURL(url);
   }
 
+  /** Exports only one folder's own styles (not its sub-folders' — a flat export matching how
+   *  `styles.filter(s => s.folderId === folderId)` scopes everywhere else in this panel), reusing
+   *  the same swal `input:'select'` picker pattern already used throughout the Studio for a single
+   *  choice (`LayersPanel`/`BrushesPanel`'s context menus). */
+  async function exportFolderJson() {
+    if (folders.length === 0) {
+      swalToast({ icon: 'info', title: 'No folders to export' });
+      return;
+    }
+    const inputOptions = Object.fromEntries(folderOptions.map(opt => [opt.id, opt.label]));
+    const result = await swal({
+      title: 'Export Folder',
+      input: 'select',
+      inputOptions,
+      inputPlaceholder: 'Choose a folder',
+      showCancelButton: true,
+      confirmButtonText: 'Export',
+    });
+    const folderId = result.value as string | undefined;
+    if (!result.isConfirmed || !folderId) return;
+    const folder = folders.find(f => f.id === folderId);
+    if (!folder) return;
+    const folderStylesOnly = styles.filter(s => s.folderId === folderId);
+    const payload = { folders: [folder], styles: folderStylesOnly };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `TypeR_${folder.name.replace(/\s+/g, '_')}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
   async function importTyperJson(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = '';
@@ -150,9 +224,20 @@ export function TyperPanel({
 
   function renderStyleCard(style: TyperStyle) {
     const expanded = editingStyleId === style.id;
+    const enabled = style.enabled !== false;
     return (
-      <div key={style.id} className="rounded-control border border-hairline bg-ink/5">
+      <div key={style.id} className={cn('rounded-control border border-hairline bg-ink/5', !enabled && 'opacity-50')}>
         <div className="w-full flex items-center gap-1 px-2.5 h-9">
+          <IconButton
+            size="sm"
+            active={!enabled}
+            aria-label={enabled ? `Disable ${style.name}` : `Enable ${style.name}`}
+            title={enabled ? 'Disable style (won’t match a prefix while off)' : 'Enable style'}
+            onClick={() => updateStyle(style.id, { enabled: !enabled })}
+            className="!bg-transparent !w-6 !h-6 shrink-0"
+          >
+            {enabled ? <Eye size={12} /> : <EyeOff size={12} />}
+          </IconButton>
           <button
             type="button"
             onClick={() => setEditingStyleId(expanded ? null : style.id)}
@@ -322,8 +407,11 @@ export function TyperPanel({
             <Upload size={13} />
           </IconButton>
           <input ref={importInputRef} type="file" accept=".json" className="hidden" onChange={importTyperJson} />
-          <IconButton size="sm" aria-label="Export TypeR JSON" title="Export TypeR JSON" onClick={exportTyperJson} className="!bg-transparent">
+          <IconButton size="sm" aria-label="Export TypeR JSON" title="Export all styles and folders as JSON" onClick={exportTyperJson} className="!bg-transparent">
             <Download size={13} />
+          </IconButton>
+          <IconButton size="sm" aria-label="Export folder" title="Export only one folder's styles as JSON" onClick={() => void exportFolderJson()} className="!bg-transparent">
+            <FolderDown size={13} />
           </IconButton>
           <IconButton
             size="sm"
@@ -366,23 +454,26 @@ export function TyperPanel({
           {lines.length === 0 && (
             <div className="text-micro text-ink-faint italic px-2 py-3 text-center">No lines yet — paste a script above.</div>
           )}
-          {lines.map((line, i) => (
-            <button
-              key={i}
-              ref={i === index ? currentRowRef : undefined}
-              type="button"
-              onClick={() => onIndexChange(i)}
-              className={cn(
-                'flex items-center gap-2 px-2 py-1.5 rounded text-left text-micro transition-colors',
-                i === index ? 'bg-accent-soft text-accent' : 'text-ink hover:bg-ink/10'
-              )}
-            >
-              <span className="w-5 shrink-0 text-right font-mono tabular-nums opacity-70">{i + 1}</span>
-              <Play size={10} className="shrink-0 opacity-60" />
-              <span className="flex-1 truncate">{line.content}</span>
-              {line.pageHint && <span className="shrink-0 px-1 py-0.5 rounded bg-ink/10 text-[10px]">P{line.pageHint}</span>}
-            </button>
-          ))}
+          {lines.map((line, i) => {
+            const placed = placedIndices.has(i);
+            return (
+              <button
+                key={i}
+                ref={i === index ? currentRowRef : undefined}
+                type="button"
+                onClick={() => onIndexChange(i)}
+                className={cn(
+                  'flex items-center gap-2 px-2 py-1.5 rounded text-left text-micro transition-colors',
+                  i === index ? 'bg-accent-soft text-accent' : placed ? 'text-ink-faint hover:bg-ink/10' : 'text-ink hover:bg-ink/10'
+                )}
+              >
+                <span className="w-5 shrink-0 text-right font-mono tabular-nums opacity-70">{i + 1}</span>
+                {placed ? <Check size={10} className="shrink-0 opacity-70 text-success" /> : <Play size={10} className="shrink-0 opacity-60" />}
+                <span className={cn('flex-1 truncate', placed && 'opacity-70')}>{line.content}</span>
+                {line.pageHint && <span className="shrink-0 px-1 py-0.5 rounded bg-ink/10 text-[10px]">P{line.pageHint}</span>}
+              </button>
+            );
+          })}
         </div>
         {done && <div className="text-micro text-ink-faint italic">All lines placed.</div>}
 
@@ -406,7 +497,7 @@ export function TyperPanel({
             size="sm"
             active={multiBubbleMode}
             aria-label="Multi-Bubble mode"
-            title="Multi-Bubble mode: queue several bubble rects, then place all their lines at once"
+            title="Multi-Bubble mode: queue several bubble rects, then place all their lines at once (Ctrl+Shift+M)"
             onClick={() => onMultiBubbleModeChange(!multiBubbleMode)}
             className="!bg-transparent !w-9 !h-9"
           >
@@ -432,6 +523,21 @@ export function TyperPanel({
               className="flex-1 h-8 rounded-control text-micro font-medium border border-hairline bg-ink/5 text-ink hover:bg-ink/10 transition-colors"
             >
               Add Bubble ({queuedBubbleCount})
+            </button>
+            <button
+              type="button"
+              disabled={queuedBubbleCount === 0}
+              title="Remove last bubble — hold 2s to clear all"
+              onPointerDown={onRemovePointerDown}
+              onPointerUp={onRemovePointerUp}
+              onPointerLeave={onRemovePointerLeave}
+              className={cn(
+                'h-8 w-8 shrink-0 rounded-control text-ui font-medium border transition-colors flex items-center justify-center',
+                'disabled:opacity-40 disabled:pointer-events-none',
+                removeHoldWarning ? 'bg-danger text-white border-danger' : 'bg-ink/5 border-hairline text-ink hover:bg-ink/10'
+              )}
+            >
+              <Minus size={14} />
             </button>
             <button
               type="button"

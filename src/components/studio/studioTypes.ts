@@ -508,6 +508,10 @@ export interface TyperStyle {
   italic: boolean;
   strokeColor: string;
   strokeWidth: number;
+  /** Eye-icon toggle: false means this style's prefix can never match a script line (it falls
+   *  through to the next candidate) — the style still exists and can be re-enabled. Missing/undefined
+   *  on data saved before this field existed is treated as enabled (see parseTyperScript's matchStyle). */
+  enabled?: boolean;
 }
 
 /** A node in the TypeR style-folder tree. Nesting is expressed via `parentId`; `order` is the
@@ -524,13 +528,13 @@ export const DEFAULT_TYPER_FOLDERS: TyperFolder[] = [
 ];
 
 export const DEFAULT_TYPER_STYLES: TyperStyle[] = [
-  { id: 'dialogue', name: 'Dialogue', folderId: 'general', prefix: '', fontFamily: FONT_FAMILIES[0], fontSize: 26, color: '#000000', bold: false, italic: false, strokeColor: '#ffffff', strokeWidth: 0 },
-  { id: 'sfx', name: 'SFX', folderId: 'general', prefix: '!!', fontFamily: 'Impact', fontSize: 44, color: '#ffffff', bold: true, italic: false, strokeColor: '#000000', strokeWidth: 3 },
-  { id: 'thought', name: 'Thought', folderId: 'general', prefix: '~', fontFamily: FONT_FAMILIES[0], fontSize: 24, color: '#000000', bold: false, italic: true, strokeColor: '#ffffff', strokeWidth: 0 },
+  { id: 'dialogue', name: 'Dialogue', folderId: 'general', prefix: '', fontFamily: FONT_FAMILIES[0], fontSize: 26, color: '#000000', bold: false, italic: false, strokeColor: '#ffffff', strokeWidth: 0, enabled: true },
+  { id: 'sfx', name: 'SFX', folderId: 'general', prefix: '!!', fontFamily: 'Impact', fontSize: 44, color: '#ffffff', bold: true, italic: false, strokeColor: '#000000', strokeWidth: 3, enabled: true },
+  { id: 'thought', name: 'Thought', folderId: 'general', prefix: '~', fontFamily: FONT_FAMILIES[0], fontSize: 24, color: '#000000', bold: false, italic: true, strokeColor: '#ffffff', strokeWidth: 0, enabled: true },
 ];
 
 export function createTyperStyle(name = 'New Style', folderId: string | null = null): TyperStyle {
-  return { id: genTyperId(), name, folderId, prefix: '', fontFamily: FONT_FAMILIES[0], fontSize: 26, color: '#000000', bold: false, italic: false, strokeColor: '#ffffff', strokeWidth: 0 };
+  return { id: genTyperId(), name, folderId, prefix: '', fontFamily: FONT_FAMILIES[0], fontSize: 26, color: '#000000', bold: false, italic: false, strokeColor: '#ffffff', strokeWidth: 0, enabled: true };
 }
 
 let typerIdCounter = 0;
@@ -693,14 +697,18 @@ export interface ParseTyperScriptOptions {
  */
 export function parseTyperScript(script: string, styles: TyperStyle[], options: ParseTyperScriptOptions = {}): TyperLine[] {
   const { folders = [], ignoreLinePrefixes = ['##'], ignoreTags = [], defaultStyleId = null, currentFolderId = null } = options;
+  const isEnabled = (s: TyperStyle) => s.enabled !== false;
   const sortedStyles = [...styles].sort((a, b) => b.prefix.length - a.prefix.length);
   const priorityFolderIds = currentFolderId ? new Set([currentFolderId, ...collectDescendantFolderIds(folders, currentFolderId)]) : null;
   const folderStyles = priorityFolderIds ? sortedStyles.filter(s => s.folderId && priorityFolderIds.has(s.folderId)) : [];
   const defaultStyle = defaultStyleId ? styles.find(s => s.id === defaultStyleId) : undefined;
 
+  // A disabled style (eye icon off) can never match by prefix — it falls through to the next
+  // candidate — but it can still be reached via defaultStyleId/the empty-prefix fallback, matching
+  // the request's "disabled styles cannot match [by prefix]" rather than removing them entirely.
   const matchStyle = (trimmed: string): TyperStyle =>
-    folderStyles.find(s => s.prefix && trimmed.startsWith(s.prefix))
-      ?? sortedStyles.find(s => s.prefix && trimmed.startsWith(s.prefix))
+    folderStyles.find(s => s.prefix && isEnabled(s) && trimmed.startsWith(s.prefix))
+      ?? sortedStyles.find(s => s.prefix && isEnabled(s) && trimmed.startsWith(s.prefix))
       ?? defaultStyle
       ?? sortedStyles.find(s => s.prefix === '')
       ?? styles[0];
