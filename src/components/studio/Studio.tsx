@@ -85,6 +85,9 @@ interface StudioProps {
   /** Project > Export as .msp — the existing workspace-level .msp export (App.tsx), threaded down so
    *  it's reachable from inside a chapter without Studio needing the whole `Workspace` object itself. */
   onExportMsp?: () => void;
+  /** Opens the standalone Text Editor tab with a doc linked to this chapter — Text Editor's only
+   *  entry point now that it's no longer a top-level nav destination. */
+  onOpenTextEditor?: () => void;
   /** Set when this mount is a spectator joining someone else's live session (from a chapter card's
    *  "Live" badge) rather than a normal editing session — renders a read-only viewer shell instead
    *  of the full edit UI, and never mounts the real Konva StudioCanvas at all. */
@@ -107,7 +110,7 @@ export function Studio(props: StudioProps) {
   );
 }
 
-function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript, onConsumePendingTyperScript, onPagesChange, onExportMsp, viewOnlySession, onActivePageChange }: StudioProps) {
+function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript, onConsumePendingTyperScript, onPagesChange, onExportMsp, onOpenTextEditor, viewOnlySession, onActivePageChange }: StudioProps) {
   const canvasRef = useRef<StudioCanvasHandle>(null);
 
   // Live collab (spectator mode) — a hosted session for this chapter, joined either as the host
@@ -2484,6 +2487,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
         goingLive={goingLive}
         liveViewerCount={Math.max(0, collabPeers.length - 1)}
         onToggleLive={isHostingLive ? handleEndLive : handleGoLive}
+        onOpenTextEditor={onOpenTextEditor}
       />
 
       {!panelsHidden && optionsBarVisible && (

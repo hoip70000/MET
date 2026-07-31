@@ -1,4 +1,4 @@
-import { Home, Maximize2, Minimize2, PanelLeft, PanelRight, MessageSquareText, Radio, Users } from 'lucide-react';
+import { Home, Maximize2, Minimize2, PanelLeft, PanelRight, MessageSquareText, Radio, Users, FileText } from 'lucide-react';
 import { IconButton } from '../ui';
 import type { WorkflowStage } from './WorkflowBar';
 
@@ -29,12 +29,15 @@ interface StudioToolbarProps {
   goingLive?: boolean;
   liveViewerCount?: number;
   onToggleLive?: () => void;
+  /** Opens the Text Editor tab with a doc linked to this chapter — the Text Editor's only entry
+   *  point now; it's no longer a top-level nav destination (see navTabs.ts). */
+  onOpenTextEditor?: () => void;
 }
 
 export function StudioToolbar({
   chapterName, showCleaned, onToggleCleaned, overlayOpacity, onOverlayOpacityChange,
   onFit, onBack, onToggleLeftSidebar, onToggleRightSidebar, hasCleaned, isFullscreen, onToggleFullscreen, workflowStages,
-  typeRegionArmed, onToggleTypeRegion, isLive, goingLive, liveViewerCount = 0, onToggleLive,
+  typeRegionArmed, onToggleTypeRegion, isLive, goingLive, liveViewerCount = 0, onToggleLive, onOpenTextEditor,
 }: StudioToolbarProps) {
   return (
     <div className="liquid-glass-bar flex items-center gap-2 px-2.5 sm:px-4 h-12 shrink-0 border-b border-hairline">
@@ -126,6 +129,12 @@ export function StudioToolbar({
             <span className="flex items-center gap-0.5 text-micro"><Users size={11} />{liveViewerCount}</span>
           )}
         </button>
+      )}
+
+      {onOpenTextEditor && (
+        <IconButton size="sm" aria-label="Open Text Editor" title="Text Editor" onClick={onOpenTextEditor} className="!bg-transparent shrink-0 max-lg:!w-11 max-lg:!h-11">
+          <FileText size={15} />
+        </IconButton>
       )}
 
       <IconButton size="sm" aria-label="Fit to screen" onClick={onFit} className="!bg-transparent shrink-0 max-lg:!w-11 max-lg:!h-11">

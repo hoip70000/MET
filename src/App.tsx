@@ -25,7 +25,7 @@ import { Modal, Button, Input, Textarea, GlassCard, SkeletonCard, AppContextMenu
 import { Studio } from './components/studio/Studio';
 import { StudioBuildTransition } from './components/studio/StudioBuildTransition';
 import { TextEditorPage } from './components/textEditor/TextEditorPage';
-import { getActiveStudioSessionsForChapters, type StudioSessionRow } from './lib/studioCollab';
+import type { StudioSessionRow } from './lib/studioCollab';
 import { applyTyperInsertMode, type TyperSendRequest } from './lib/typerBridge';
 import { loadChapterStudioData, saveChapterStudioData, createEmptyStudioData } from './lib/studioProjectStore';
 import { useAutomationEngine } from './lib/automationEngine';
@@ -134,10 +134,8 @@ export default function App() {
   // Carries a chapter's "Open in Text Editor" click into the Text Editor tab — TextEditorPage
   // consumes and clears this once it resolves/creates that chapter's linked doc.
   const [pendingTextEditorChapter, setPendingTextEditorChapter] = useState<{ id: string; name: string } | null>(null);
-  // Which chapters currently have a live collab session (see studioCollab.ts) — keyed by
-  // chapter id, refreshed whenever a volume's chapter grid is shown. Clicking a "Live" badge
-  // sets viewOnlySession and opens that chapter's Studio in read-only spectator mode.
-  const [liveSessionsByChapter, setLiveSessionsByChapter] = useState<Record<string, StudioSessionRow>>({});
+  // Set by Teams' "Watch" button on a live session (see LiveSessionsSection in TeamsPanel.tsx) —
+  // opens that chapter's Studio in read-only spectator mode instead of the normal edit flow.
   const [viewOnlySession, setViewOnlySession] = useState<{ sessionId: string; teamId: string } | null>(null);
   // Carries a `?join=<token>` invite link into the Teams tab on load, redeemed
   // (as a join request, not an auto-join) then cleared from the URL.
@@ -279,20 +277,35 @@ export default function App() {
     setViewOnlySession(null);
   };
 
-  // Refreshes which of the currently-shown volume's chapters have a live collab session, so the
-  // chapter grid can show a "Live" badge. One batched query per volume view rather than N+1.
-  useEffect(() => {
-    if (!activeVolume || activeVolume.chapters.length === 0) {
-      setLiveSessionsByChapter({});
+  /** Finds which workspace/manga/volume a chapter id lives under, for jumping straight to it from
+   *  outside the Library (e.g. Teams' "Watch" button on a live session) — chapter ids are only
+   *  meaningful within this device's own local library, so a session's chapter_id may not resolve
+   *  to anything here at all (see LiveSessionsSection's own handling of that). */
+  const findChapterLocation = (chapterId: string): { workspaceId: string; mangaId: string; volumeId: string; chapterName: string } | null => {
+    for (const ws of workspaces) {
+      for (const manga of ws.mangas) {
+        for (const volume of manga.volumes) {
+          const chapter = volume.chapters.find(c => c.id === chapterId);
+          if (chapter) return { workspaceId: ws.id, mangaId: manga.id, volumeId: volume.id, chapterName: chapter.name };
+        }
+      }
+    }
+    return null;
+  };
+
+  const handleWatchLiveSession = (session: StudioSessionRow) => {
+    const loc = findChapterLocation(session.chapter_id);
+    if (!loc) {
+      swal({ icon: 'error', title: 'Chapter not found', text: "This session's chapter isn't in your local library on this device." });
       return;
     }
-    let cancelled = false;
-    getActiveStudioSessionsForChapters(activeVolume.chapters.map(c => c.id)).then((sessions) => {
-      if (cancelled) return;
-      setLiveSessionsByChapter(Object.fromEntries(sessions.map(s => [s.chapter_id, s])));
-    }).catch(() => {});
-    return () => { cancelled = true; };
-  }, [activeVolume?.id, activeVolume?.chapters.length]);
+    setActiveWorkspaceId(loc.workspaceId);
+    setActiveMangaId(loc.mangaId);
+    setActiveVolumeId(loc.volumeId);
+    setViewOnlySession({ sessionId: session.id, teamId: session.team_id });
+    setActiveChapterId(session.chapter_id);
+    setActiveNavigationTab('library');
+  };
 
   const updateActiveWorkspaceMangas = (updater: (mangas: MangaSeries[]) => MangaSeries[]) => {
     if (!activeWorkspace) return;
@@ -828,7 +841,15 @@ export default function App() {
             </div>
           )}
 
-          {activeNavigationTab === 'teams' && <TeamsPanel cc={cloudClient} pendingJoinToken={pendingJoinToken} onConsumedJoinToken={() => setPendingJoinToken(null)} />}
+          {activeNavigationTab === 'teams' && (
+            <TeamsPanel
+              cc={cloudClient}
+              pendingJoinToken={pendingJoinToken}
+              onConsumedJoinToken={() => setPendingJoinToken(null)}
+              workspaces={workspaces}
+              onWatchLiveSession={handleWatchLiveSession}
+            />
+          )}
 
           {activeNavigationTab === 'text-editor' && (
             <div className="fixed inset-0 lg:relative lg:inset-auto flex flex-col bg-[#e5e7eb] dark:bg-[#1e1e1e] lg:rounded-2xl lg:overflow-hidden lg:border lg:border-hairline lg:h-[calc(100vh-8.5rem)] z-30">
@@ -885,6 +906,10 @@ export default function App() {
                   onBack={resetToLibraryRoot}
                   onPagesChange={handleChapterPagesChange}
                   onExportMsp={() => handleExportWorkspace(activeWorkspace)}
+                  onOpenTextEditor={() => {
+                    setPendingTextEditorChapter({ id: activeChapter.id, name: activeChapter.name });
+                    setActiveNavigationTab('text-editor');
+                  }}
                   viewOnlySession={viewOnlySession}
                   onActivePageChange={setStudioActivePageId}
                 />
@@ -924,23 +949,6 @@ export default function App() {
                             <p className="text-[11px] text-ink-faint">{chap.pages.length} page(s)</p>
                           </div>
                         </GlassCard>
-                        {liveSessionsByChapter[chap.id] && (
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              const session = liveSessionsByChapter[chap.id];
-                              setViewOnlySession({ sessionId: session.id, teamId: session.team_id });
-                              setPendingChapterId(chap.id);
-                              setStudioBuilding(true);
-                            }}
-                            className="absolute top-2 left-2 flex items-center gap-1 px-2 py-1 rounded-full bg-danger text-white text-[10px] font-semibold uppercase tracking-wide shadow-lg hover:bg-danger/90"
-                            aria-label="Watch live session"
-                            title="A team member is live in this chapter — click to watch"
-                          >
-                            <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
-                            Live
-                          </button>
-                        )}
                         <div className="absolute top-2 right-2 flex items-center gap-1">
                           <button
                             onClick={(e) => { e.stopPropagation(); openEditChapter(chap); }}

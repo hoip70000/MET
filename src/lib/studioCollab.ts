@@ -48,20 +48,13 @@ export async function getActiveStudioSession(teamId: string, chapterId: string):
   return (data as StudioSessionRow) ?? null;
 }
 
-/** Any live session(s) for this chapter, across every team the current user can see — RLS on
- *  `studio_sessions` already scopes this to the caller's own teams, so no explicit team filter
- *  is needed here. Chapters aren't tied to a team in this app's data model, so "is this chapter
- *  live" has to be asked this way rather than via a stored chapter->team link. */
-export async function getActiveStudioSessionsForChapter(chapterId: string): Promise<StudioSessionRow[]> {
-  const { data } = await supabase.from('studio_sessions').select('*').eq('chapter_id', chapterId).is('ended_at', null);
-  return (data as StudioSessionRow[]) ?? [];
-}
-
-/** Batched form of the above, for a Library chapter-card grid — one query for every chapter
- *  currently on screen instead of one per card. */
-export async function getActiveStudioSessionsForChapters(chapterIds: string[]): Promise<StudioSessionRow[]> {
-  if (chapterIds.length === 0) return [];
-  const { data } = await supabase.from('studio_sessions').select('*').in('chapter_id', chapterIds).is('ended_at', null);
+/** Active live sessions for one specific team — the only scope this is ever queried at (Teams'
+ *  own "Live" section, one team at a time, per the RLS-backed guarantee that a member of team A
+ *  can never see team B's rows this way). RLS on `studio_sessions` additionally already restricts
+ *  this to teams the caller belongs to, so a stray call with someone else's team_id just comes
+ *  back empty rather than leaking anything. */
+export async function getActiveStudioSessionsForTeam(teamId: string): Promise<StudioSessionRow[]> {
+  const { data } = await supabase.from('studio_sessions').select('*').eq('team_id', teamId).is('ended_at', null);
   return (data as StudioSessionRow[]) ?? [];
 }
 
