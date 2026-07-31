@@ -11,8 +11,14 @@ interface RemoteCursor {
 }
 
 interface CollabViewerCanvasProps {
-  /** The host's latest broadcast raster snapshot — a plain data URL, re-set on every throttled frame. */
+  /** The host's latest broadcast raster snapshot — a plain data URL, re-set on every throttled
+   *  frame. Only ever actually shown when `videoStream` isn't available (screen share off/not
+   *  supported) — a real live video feed is strictly better than a photo slideshow whenever it's
+   *  possible, see useStudioScreenShare.ts. */
   frameDataUrl: string | null;
+  /** The host's live screen-share video track (useStudioScreenShare.ts), when they're sharing.
+   *  Takes over the display entirely in place of frameDataUrl while present. */
+  videoStream?: MediaStream | null;
   cursors: RemoteCursor[];
   peers: StudioCollabPeer[];
   /** Page-space (unscaled image pixel) coordinates, so a viewer can point at the canvas too. */
@@ -33,12 +39,24 @@ interface CollabViewerCanvasProps {
  * remote control, pointer gestures are additionally relayed to the host rather than only tracked
  * for the cursor overlay.
  */
-export function CollabViewerCanvas({ frameDataUrl, cursors, peers, onPointerMove, hasControl, onPointerDown, onPointerUp }: CollabViewerCanvasProps) {
+export function CollabViewerCanvas({ frameDataUrl, videoStream, cursors, peers, onPointerMove, hasControl, onPointerDown, onPointerUp }: CollabViewerCanvasProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
   const [naturalSize, setNaturalSize] = useState<{ w: number; h: number } | null>(null);
   const [containerSize, setContainerSize] = useState({ w: 0, h: 0 });
   const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // A <video> element's srcObject isn't a real DOM attribute/React prop — it can only be set
+  // imperatively, same reason every <video srcObject> usage in this codebase already needs an effect.
+  useEffect(() => {
+    if (videoRef.current) videoRef.current.srcObject = videoStream ?? null;
+  }, [videoStream]);
+
+  // Switching between video and image sources mid-session shouldn't keep stale dimensions from
+  // whichever was showing before (a filled `naturalSize` skips the "waiting for first frame"
+  // state and can briefly mis-scale the new source using the old one's proportions).
+  useEffect(() => { setNaturalSize(null); }, [!!videoStream]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -103,6 +121,12 @@ export function CollabViewerCanvas({ frameDataUrl, cursors, peers, onPointerMove
     setNaturalSize((prev) => (prev && prev.w === w && prev.h === h ? prev : { w, h }));
   }
 
+  function handleVideoLoadedMetadata(e: React.SyntheticEvent<HTMLVideoElement>) {
+    const w = e.currentTarget.videoWidth;
+    const h = e.currentTarget.videoHeight;
+    setNaturalSize((prev) => (prev && prev.w === w && prev.h === h ? prev : { w, h }));
+  }
+
   return (
     <div ref={rootRef} className="relative w-full h-full">
       <div
@@ -112,7 +136,17 @@ export function CollabViewerCanvas({ frameDataUrl, cursors, peers, onPointerMove
         onPointerDown={handlePointerDown}
         onPointerUp={handlePointerUp}
       >
-        {frameDataUrl ? (
+        {videoStream ? (
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className="select-none pointer-events-none"
+            style={naturalSize ? { width: naturalSize.w * scale, height: naturalSize.h * scale } : undefined}
+            onLoadedMetadata={handleVideoLoadedMetadata}
+          />
+        ) : frameDataUrl ? (
           <img
             src={frameDataUrl}
             alt="Live canvas"

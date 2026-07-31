@@ -63,6 +63,7 @@ import {
   type StudioCollabPeer, type StudioSessionRow, type StudioCollabHandle,
 } from '../../lib/studioCollab';
 import { useStudioVoiceChat } from './useStudioVoiceChat';
+import { useStudioScreenShare } from './useStudioScreenShare';
 import { CollabCursors } from './CollabCursors';
 import { CollabViewerCanvas } from './CollabViewerCanvas';
 import { CollabSessionPanel, type CollabChatMessage } from './CollabSessionPanel';
@@ -154,6 +155,14 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
   // needed for realtime chat messages.
   const voiceRef = useRef(voice);
   useEffect(() => { voiceRef.current = voice; }, [voice]);
+  const screenShare = useStudioScreenShare({
+    collabHandleRef,
+    selfUserId: collabSelf?.id ?? null,
+    isHost: isHostingLive,
+    peerUserIds: collabPeers.filter(p => p.userId !== collabSelf?.id).map(p => p.userId),
+  });
+  const screenShareRef = useRef(screenShare);
+  useEffect(() => { screenShareRef.current = screenShare; }, [screenShare]);
   const panelLayout = usePanelLayout();
 
   useEffect(() => {
@@ -183,6 +192,10 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
         onVoiceOffer: (from, sdp) => voiceRef.current.handleOffer(from, sdp),
         onVoiceAnswer: (from, sdp) => voiceRef.current.handleAnswer(from, sdp),
         onVoiceIce: (from, candidate) => voiceRef.current.handleIce(from, candidate),
+        onScreenshareOffer: (from, sdp) => screenShareRef.current.handleOffer(from, sdp),
+        onScreenshareAnswer: (from, sdp) => screenShareRef.current.handleAnswer(from, sdp),
+        onScreenshareIce: (from, candidate) => screenShareRef.current.handleIce(from, candidate),
+        onScreenshareEnded: () => screenShareRef.current.handleEnded(),
         onControlGranted: setControlGrantedTo,
       },
     );
@@ -225,6 +238,8 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
           onVoiceOffer: (from, sdp) => voiceRef.current.handleOffer(from, sdp),
           onVoiceAnswer: (from, sdp) => voiceRef.current.handleAnswer(from, sdp),
           onVoiceIce: (from, candidate) => voiceRef.current.handleIce(from, candidate),
+          onScreenshareAnswer: (from, sdp) => screenShareRef.current.handleAnswer(from, sdp),
+          onScreenshareIce: (from, candidate) => screenShareRef.current.handleIce(from, candidate),
           onControlRequest: async (userId, name) => {
             const r = await swal({
               icon: 'question',
@@ -512,7 +527,10 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
   // Host broadcast loop: a throttled, downscaled flattened snapshot of the active page — not a
   // layer/diff replication model (see "Live collaborative Studio" in CLAUDE.md). Viewers never
   // edit, so there's nothing to gain from shipping the real paint/mask canvas registries and
-  // Konva render pipeline to them.
+  // Konva render pipeline to them. Deliberately kept running even while screen-sharing is active
+  // (CollabViewerCanvas prefers the live video when present) — it's each viewer's own fallback if
+  // *their specific* WebRTC video connection fails while everyone else's is fine, not something
+  // to shut off just because sharing is nominally on.
   useEffect(() => {
     if (!isHostingLive) return;
     let cancelled = false;
@@ -2536,6 +2554,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
           <div className="flex-1 min-h-0 min-w-0">
             <CollabViewerCanvas
               frameDataUrl={viewerFrame}
+              videoStream={screenShare.remoteStream}
               cursors={remoteCursors}
               peers={collabPeers}
               onPointerMove={(x, y) => {
@@ -2593,6 +2612,8 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
         goingLive={goingLive}
         liveViewerCount={Math.max(0, collabPeers.length - 1)}
         onToggleLive={isHostingLive ? handleEndLive : undefined}
+        isSharingScreen={screenShare.sharing}
+        onToggleScreenShare={screenShare.toggleSharing}
         onOpenTextEditor={onOpenTextEditor}
       />
 

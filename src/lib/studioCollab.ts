@@ -120,6 +120,17 @@ export interface StudioCollabHandlers {
   onVoiceOffer?: (fromUserId: string, sdp: RTCSessionDescriptionInit) => void;
   onVoiceAnswer?: (fromUserId: string, sdp: RTCSessionDescriptionInit) => void;
   onVoiceIce?: (fromUserId: string, candidate: RTCIceCandidateInit) => void;
+  /** Live screen-share video signaling — see useStudioScreenShare.ts, the only consumer. A
+   *  deliberately separate connection set from the voice mesh above: screen share is one-way
+   *  (host → every viewer, a star, not a mesh — viewers never need video from each other), so
+   *  reusing the mesh's bidirectional per-pair connections would mean negotiating video capability
+   *  between viewer pairs that will never actually carry a video track. */
+  onScreenshareOffer?: (fromUserId: string, sdp: RTCSessionDescriptionInit) => void;
+  onScreenshareAnswer?: (fromUserId: string, sdp: RTCSessionDescriptionInit) => void;
+  onScreenshareIce?: (fromUserId: string, candidate: RTCIceCandidateInit) => void;
+  /** The host stopped sharing their screen (browser "Stop sharing" bar, or the toggle button) —
+   *  viewers should fall back to the periodic snapshot frames again. */
+  onScreenshareEnded?: () => void;
   /** Remote control — a viewer asking to drive the host's Studio. Host-only: fires when someone
    *  else requests control. */
   onControlRequest?: (fromUserId: string, name: string) => void;
@@ -142,6 +153,11 @@ export interface StudioCollabHandle {
   sendVoiceOffer: (toUserId: string, sdp: RTCSessionDescriptionInit) => void;
   sendVoiceAnswer: (toUserId: string, sdp: RTCSessionDescriptionInit) => void;
   sendVoiceIce: (toUserId: string, candidate: RTCIceCandidateInit) => void;
+  sendScreenshareOffer: (toUserId: string, sdp: RTCSessionDescriptionInit) => void;
+  sendScreenshareAnswer: (toUserId: string, sdp: RTCSessionDescriptionInit) => void;
+  sendScreenshareIce: (toUserId: string, candidate: RTCIceCandidateInit) => void;
+  /** Host-only: tells every viewer to fall back to snapshot frames again. */
+  announceScreenshareEnded: () => void;
   /** Viewer → host: "let me drive." */
   requestControl: () => void;
   /** Host → everyone: grant control to a userId, or pass null to revoke/take it back. */
@@ -196,6 +212,18 @@ export function joinStudioSessionChannel(
     .on('broadcast', { event: 'voice-ice' }, ({ payload }) => {
       if (payload.toUserId === self.userId) handlers.onVoiceIce?.(payload.fromUserId, payload.candidate);
     })
+    .on('broadcast', { event: 'screenshare-offer' }, ({ payload }) => {
+      if (payload.toUserId === self.userId) handlers.onScreenshareOffer?.(payload.fromUserId, payload.sdp);
+    })
+    .on('broadcast', { event: 'screenshare-answer' }, ({ payload }) => {
+      if (payload.toUserId === self.userId) handlers.onScreenshareAnswer?.(payload.fromUserId, payload.sdp);
+    })
+    .on('broadcast', { event: 'screenshare-ice' }, ({ payload }) => {
+      if (payload.toUserId === self.userId) handlers.onScreenshareIce?.(payload.fromUserId, payload.candidate);
+    })
+    .on('broadcast', { event: 'screenshare-ended' }, () => {
+      handlers.onScreenshareEnded?.();
+    })
     .on('broadcast', { event: 'control-request' }, ({ payload }) => {
       if (self.isHost && payload.userId !== self.userId) handlers.onControlRequest?.(payload.userId, payload.name);
     })
@@ -219,6 +247,10 @@ export function joinStudioSessionChannel(
     sendVoiceOffer: (toUserId, sdp) => { channel.send({ type: 'broadcast', event: 'voice-offer', payload: { fromUserId: self.userId, toUserId, sdp } }); },
     sendVoiceAnswer: (toUserId, sdp) => { channel.send({ type: 'broadcast', event: 'voice-answer', payload: { fromUserId: self.userId, toUserId, sdp } }); },
     sendVoiceIce: (toUserId, candidate) => { channel.send({ type: 'broadcast', event: 'voice-ice', payload: { fromUserId: self.userId, toUserId, candidate } }); },
+    sendScreenshareOffer: (toUserId, sdp) => { channel.send({ type: 'broadcast', event: 'screenshare-offer', payload: { fromUserId: self.userId, toUserId, sdp } }); },
+    sendScreenshareAnswer: (toUserId, sdp) => { channel.send({ type: 'broadcast', event: 'screenshare-answer', payload: { fromUserId: self.userId, toUserId, sdp } }); },
+    sendScreenshareIce: (toUserId, candidate) => { channel.send({ type: 'broadcast', event: 'screenshare-ice', payload: { fromUserId: self.userId, toUserId, candidate } }); },
+    announceScreenshareEnded: () => { channel.send({ type: 'broadcast', event: 'screenshare-ended', payload: {} }); },
     requestControl: () => { channel.send({ type: 'broadcast', event: 'control-request', payload: { userId: self.userId, name: self.name } }); },
     grantControl: (userId) => { channel.send({ type: 'broadcast', event: 'control-granted', payload: { userId } }); },
     sendRemoteInput: (kind, x, y, button) => { channel.send({ type: 'broadcast', event: 'remote-input', payload: { userId: self.userId, kind, x, y, button } }); },

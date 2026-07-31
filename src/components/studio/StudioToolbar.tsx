@@ -1,4 +1,4 @@
-import { Home, Maximize2, Minimize2, PanelLeft, PanelRight, MessageSquareText, Radio, Users, FileText } from 'lucide-react';
+import { Home, Maximize2, Minimize2, PanelLeft, PanelRight, MessageSquareText, Radio, Users, FileText, ScreenShare, ScreenShareOff } from 'lucide-react';
 import { IconButton } from '../ui';
 import type { WorkflowStage } from './WorkflowBar';
 
@@ -29,6 +29,10 @@ interface StudioToolbarProps {
   goingLive?: boolean;
   liveViewerCount?: number;
   onToggleLive?: () => void;
+  /** Live screen-share (real video, vs. the periodic snapshot frame) — host-only, only shown while
+   *  actually live. Undefined when not hosting at all. */
+  isSharingScreen?: boolean;
+  onToggleScreenShare?: () => void;
   /** Opens the Text Editor tab with a doc linked to this chapter — the Text Editor's only entry
    *  point now; it's no longer a top-level nav destination (see navTabs.ts). */
   onOpenTextEditor?: () => void;
@@ -37,7 +41,8 @@ interface StudioToolbarProps {
 export function StudioToolbar({
   chapterName, showCleaned, onToggleCleaned, overlayOpacity, onOverlayOpacityChange,
   onFit, onBack, onToggleLeftSidebar, onToggleRightSidebar, hasCleaned, isFullscreen, onToggleFullscreen, workflowStages,
-  typeRegionArmed, onToggleTypeRegion, isLive, goingLive, liveViewerCount = 0, onToggleLive, onOpenTextEditor,
+  typeRegionArmed, onToggleTypeRegion, isLive, goingLive, liveViewerCount = 0, onToggleLive,
+  isSharingScreen, onToggleScreenShare, onOpenTextEditor,
 }: StudioToolbarProps) {
   return (
     <div className="liquid-glass-bar flex items-center gap-2 px-2.5 sm:px-4 h-12 shrink-0 border-b border-hairline">
@@ -132,6 +137,20 @@ export function StudioToolbar({
           {isLive && liveViewerCount > 0 && (
             <span className="flex items-center gap-0.5 text-micro"><Users size={11} />{liveViewerCount}</span>
           )}
+        </button>
+      )}
+
+      {isLive && onToggleScreenShare && (
+        <button
+          type="button"
+          onClick={onToggleScreenShare}
+          className={`shrink-0 flex items-center gap-1.5 h-8 px-2.5 rounded-control border text-ui font-medium transition-colors ${
+            isSharingScreen ? 'bg-success/15 border-success/40 text-success hover:bg-success/25' : 'bg-ink/5 border-hairline text-ink hover:bg-ink/10'
+          }`}
+          title={isSharingScreen ? 'Stop sharing your screen' : 'Share this browser tab as live video — choose "This Tab" in the picker so nothing else you do is visible'}
+        >
+          {isSharingScreen ? <ScreenShareOff size={13} /> : <ScreenShare size={13} />}
+          <span className="hidden sm:inline">{isSharingScreen ? 'Sharing Tab' : 'Share This Tab'}</span>
         </button>
       )}
 
