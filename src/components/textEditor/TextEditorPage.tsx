@@ -6,14 +6,14 @@ import {
   Pencil, Eye,
   Heading3, Heading4, AlignJustify, IndentIncrease, IndentDecrease,
   Strikethrough, Undo2, Redo2, Languages, ChevronUp, ChevronDown, Minus, Clock,
-  Maximize2, Minimize2, Sun, Moon, Columns2, ChevronLeft, ChevronRight,
+  Maximize2, Minimize2, Sun, Moon,
 } from 'lucide-react';
 import { Button, IconButton } from '../ui';
 import { useTheme } from '../../contexts/ThemeContext';
 import { swal, swalToast, Swal } from '../../lib/swalTheme';
 import { genId } from '../../lib/id';
 import { loadTextEditorDocs, saveTextEditorDocs, defaultDocStatus, type TextEditorDoc, type TextEditorDocStatus } from '../../lib/textEditorStore';
-import { markMisspellings, markMisspellingsLive, stripSpellMarks, findAllSpellIssues } from '../../lib/spellCheck';
+import { stripSpellMarks } from '../../lib/spellCheck';
 import { exportDocAsTxt, exportDocAsDocx, printDocAsPdf, downloadBlob } from '../../lib/textEditorExport';
 import { SplitScreenPreview } from './SplitScreenPreview';
 import { DocumentLibrary } from './DocumentLibrary';
@@ -34,7 +34,7 @@ import type { TextEditorMenuActions } from './textEditorMenuDefinitions';
 import { useTextEditorShortcuts } from './useTextEditorShortcuts';
 import { SendToTyperDialog, type SendToTyperChapterOption, type SendToTyperResult } from './SendToTyperDialog';
 import type { TyperSendRequest } from '../../lib/typerBridge';
-import type { Workspace, Chapter } from '../../types';
+import type { Workspace } from '../../types';
 
 /**
  * Section 0 architecture audit (see plan doc for full detail):
@@ -80,9 +80,6 @@ import type { Workspace, Chapter } from '../../types';
 const PAGE_WIDTH = 794; // A4 at 96dpi
 const PAGE_HEIGHT = 1123;
 const AUTOSAVE_MS = 1000;
-const SPLIT_RATIO_KEY = 'text_editor_split_ratio';
-const MIN_SPLIT_RATIO = 0.2;
-const MAX_SPLIT_RATIO = 0.8;
 
 function newDoc(title = 'Untitled'): TextEditorDoc {
   return { id: genId('tedoc'), title, dir: 'ltr', pages: [''], updatedAt: Date.now(), status: defaultDocStatus() };
@@ -93,6 +90,17 @@ function formatFileSize(bytes: number): string {
   const kb = bytes / 1024;
   if (kb < 1024) return `${kb.toFixed(1)} KB`;
   return `${(kb / 1024).toFixed(1)} MB`;
+}
+
+/** `command`/`blockTag` are only present on buttons with a real queryCommandState/Value-checkable
+ *  active state — Undo/Redo/Insert Table/indent/outdent have no meaningful "is this on" concept,
+ *  so they're left with neither and always render inactive. */
+interface ToolbarButtonDef {
+  icon: React.ComponentType<{ size?: number }>;
+  label: string;
+  run: () => void;
+  command?: string;
+  blockTag?: string;
 }
 
 interface EditablePageProps {
@@ -107,24 +115,35 @@ interface EditablePageProps {
 /** Isolated behind `memo` deliberately — see the A2 note in the audit comment
  *  above. Must receive only stable/primitive props (a string, not a fresh
  *  `{__html}` wrapper object; stable callback references) or the memoization
- *  is defeated and every parent re-render still reaches into this DOM. */
+ *  is defeated and every parent re-render still reaches into this DOM.
+ *
+ *  This isn't just about *comparing* props cheaply — it turned out to be about whether
+ *  `dangerouslySetInnerHTML` gets reapplied at all. `initialHtml` (from `docs` state) is
+ *  intentionally stale while typing (state is never synced on every keystroke — see A2 above),
+ *  so it can sit at `''` for a brand-new page indefinitely while the *live* DOM already has real
+ *  typed content the browser put there directly. That's safe only as long as this component never
+ *  actually re-renders past its initial mount: the FIRST time it does — for *any* reason, even an
+ *  unrelated prop most would assume is harmless — React diffs and reapplies
+ *  `dangerouslySetInnerHTML` against that stale value, wiping the live content back to it.
+ *  Confirmed empirically (not assumed): adding a primitive `zoom`/`spellCheckActive` prop here
+ *  and toggling it after typing reproduced exactly this wipe. Anything that needs to vary per
+ *  render (zoom, the page-number footer, the spellcheck attribute) has to live *outside* this
+ *  component (the parent's own wrapper JSX) or be applied imperatively via `pageRefs` in a
+ *  `useEffect`, never as a prop that flows into this render. */
 const EditablePage = memo(function EditablePage({ initialHtml, pageRef, onInput, onClick, onKeyDown, onContextMenu }: EditablePageProps) {
   return (
-    <div className="shrink-0 overflow-hidden rounded-sm shadow-2xl" style={{ width: PAGE_WIDTH }}>
-      <div
-        ref={pageRef}
-        contentEditable
-        suppressContentEditableWarning
-        spellCheck
-        dangerouslySetInnerHTML={{ __html: initialHtml }}
-        onInput={onInput}
-        onClick={onClick}
-        onKeyDown={onKeyDown}
-        onContextMenu={onContextMenu}
-        className="te-page bg-white text-black px-16 py-16 text-[15px] leading-relaxed outline-none overflow-hidden"
-        style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT, minHeight: PAGE_HEIGHT, colorScheme: 'light' }}
-      />
-    </div>
+    <div
+      ref={pageRef}
+      contentEditable
+      suppressContentEditableWarning
+      dangerouslySetInnerHTML={{ __html: initialHtml }}
+      onInput={onInput}
+      onClick={onClick}
+      onKeyDown={onKeyDown}
+      onContextMenu={onContextMenu}
+      className="te-page bg-white text-black px-16 py-16 text-[15px] leading-relaxed outline-none overflow-hidden"
+      style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT, minHeight: PAGE_HEIGHT, colorScheme: 'light' }}
+    />
   );
 });
 
@@ -162,16 +181,13 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
   const [wholeWord, setWholeWord] = useState(false);
   const [matchCount, setMatchCount] = useState(0);
   const [currentMatchIndex, setCurrentMatchIndex] = useState(0);
-  const [spellReport, setSpellReport] = useState<number | null>(null);
   const [saveStatus, setSaveStatus] = useState<'saved' | 'unsaved' | 'saving' | 'error'>('saved');
   const [activeTable, setActiveTable] = useState<HTMLTableElement | null>(null);
   const [tableFullySelected, setTableFullySelected] = useState(false);
-  const [tableContextMenuPos, setTableContextMenuPos] = useState<{ x: number; y: number } | null>(null);
   const activeTableCellRef = useRef<HTMLTableCellElement | null>(null);
   /** Increments across the session so a deleted-then-recreated "Document N"
    *  never collides with an existing title, unlike a plain docs.length+1. */
   const docCounterRef = useRef(0);
-  const tableContextMenuRef = useRef<HTMLDivElement | null>(null);
   const [selectedImage, setSelectedImage] = useState<HTMLImageElement | null>(null);
   const [imageContextMenuPos, setImageContextMenuPos] = useState<{ x: number; y: number } | null>(null);
   const imageContextMenuRef = useRef<HTMLDivElement | null>(null);
@@ -197,71 +213,6 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
         swalToast({ icon: 'error', title: "Couldn't enter fullscreen" });
       });
     }
-  }
-
-  // Split screen: a read-only manga-page preview alongside the editor. Split ratio is remembered
-  // per session (localStorage); split on/off itself isn't — a fresh session always starts
-  // full-width.
-  const [splitScreen, setSplitScreen] = useState(false);
-  const [splitRatio, setSplitRatio] = useState(() => {
-    const stored = Number(localStorage.getItem(SPLIT_RATIO_KEY));
-    return Number.isFinite(stored) && stored >= MIN_SPLIT_RATIO && stored <= MAX_SPLIT_RATIO ? stored : 0.5;
-  });
-
-  /** The chapter whose pages the preview shows: whichever chapter is currently associated with
-   *  Studio, falling back to the first chapter that exists anywhere, so the preview still has
-   *  something to show before the user has opened Studio at all this session. */
-  const previewChapter = useMemo(() => {
-    let fallback: Chapter | null = null;
-    for (const ws of workspaces) {
-      for (const manga of ws.mangas) {
-        for (const vol of manga.volumes) {
-          for (const ch of vol.chapters) {
-            if (ch.id === activeChapterId) return ch;
-            if (!fallback) fallback = ch;
-          }
-        }
-      }
-    }
-    return fallback;
-  }, [workspaces, activeChapterId]);
-
-  const previewPages = useMemo(
-    () => (previewChapter?.pages ?? []).map(p => p.cleaned?.dataUrl ?? p.original.dataUrl),
-    [previewChapter],
-  );
-
-  const [previewPageIndex, setPreviewPageIndex] = useState(0);
-  // Follows Studio's own live page live — but only the moment it *changes*, so browsing the
-  // preview independently afterward (via its own prev/next/page-number controls) doesn't keep
-  // getting yanked back.
-  useEffect(() => {
-    if (!studioActivePageId || !previewChapter) return;
-    const idx = previewChapter.pages.findIndex(p => p.id === studioActivePageId);
-    if (idx >= 0) setPreviewPageIndex(idx);
-  }, [studioActivePageId, previewChapter]);
-  const clampedPreviewIndex = Math.min(Math.max(previewPageIndex, 0), Math.max(0, previewPages.length - 1));
-
-  /** Drag-to-resize the split divider — the same manual pointermove/pointerup-on-window idiom
-   *  StudioCanvas.tsx's Space-hold pan and the image resize handle above already use in this
-   *  codebase, rather than Konva/native drag (neither applies to plain HTML layout). */
-  function handleSplitDividerPointerDown(e: React.PointerEvent) {
-    const container = (e.currentTarget as HTMLElement).parentElement;
-    if (!container) return;
-    const startX = e.clientX;
-    const startRatio = splitRatio;
-    const width = container.getBoundingClientRect().width;
-    function onMove(ev: PointerEvent) {
-      const next = Math.min(MAX_SPLIT_RATIO, Math.max(MIN_SPLIT_RATIO, startRatio + (ev.clientX - startX) / width));
-      setSplitRatio(next);
-      localStorage.setItem(SPLIT_RATIO_KEY, String(next));
-    }
-    function onUp() {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-    }
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
   }
 
   const pageRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -573,7 +524,12 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
       if (hostPage && target) {
         hostPage.focus();
         const range = document.createRange();
-        range.setStart(target, 0);
+        // setStartBefore(target), not setStart(target, 0): the latter is a boundary point
+        // *inside* target (before its own first child), which isCaretAtPageStart's own
+        // setStartBefore(marker.nextSibling) check ranks as *after* this position per the DOM
+        // Range boundary-point-comparison algorithm — Backspace-to-merge would never fire on a
+        // freshly-created page otherwise.
+        range.setStartBefore(target);
         range.collapse(true);
         const sel = window.getSelection();
         sel?.removeAllRanges();
@@ -600,21 +556,6 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
       activeTable.style.outlineOffset = '';
     };
   }, [activeTable, tableFullySelected]);
-
-  useEffect(() => {
-    if (!tableContextMenuPos) return;
-    function dismiss(e: PointerEvent) {
-      if (tableContextMenuRef.current?.contains(e.target as Node)) return;
-      setTableContextMenuPos(null);
-    }
-    function onKey(e: KeyboardEvent) { if (e.key === 'Escape') setTableContextMenuPos(null); }
-    window.addEventListener('pointerdown', dismiss);
-    window.addEventListener('keydown', onKey);
-    return () => {
-      window.removeEventListener('pointerdown', dismiss);
-      window.removeEventListener('keydown', onKey);
-    };
-  }, [tableContextMenuPos]);
 
   useEffect(() => {
     if (!imageContextMenuPos) return;
@@ -673,6 +614,14 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     document.execCommand(command, false, value);
   }
 
+  /** Clicking a heading button while the block is already that heading reverts it to a plain
+   *  paragraph instead of re-applying the same heading — matches every other rich text editor's
+   *  toggle convention. */
+  function toggleFormatBlock(tag: string) {
+    const current = document.queryCommandValue('formatBlock').toLowerCase();
+    exec('formatBlock', current === tag.toLowerCase() ? 'P' : tag);
+  }
+
   function activePageEl(): HTMLElement | null {
     const el = document.activeElement;
     return el instanceof HTMLElement && el.classList.contains('te-page') ? el : null;
@@ -682,6 +631,10 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
    *  the standard workaround is applying size "7" then fixing up the resulting `<font>` tag(s) to
    *  a real pixel value directly. */
   function applyFontSize(px: number) {
+    // The font-size input/steppers necessarily steal focus before this runs (typing a value,
+    // clicking a stepper button) — activePageEl() would otherwise see the input/button, not the
+    // page, and silently no-op. Restore the selection captured on the control's own mousedown.
+    if (!activePageEl()) restoreFormatSelection();
     const page = activePageEl();
     if (!page) return;
     document.execCommand('fontSize', false, '7');
@@ -847,8 +800,13 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
    *  ever runs, so reading `document.activeElement`/the live selection at that point would only
    *  ever see the menu button, never the page. */
   const lastPageSelectionRef = useRef<{ page: HTMLDivElement; range: Range } | null>(null);
+  // Bumped on every selectionchange purely to force a re-render — the toolbar reads
+  // document.queryCommandState/Value fresh at render time (see toolbarButtons' active prop
+  // below), so it has no state of its own to update; it just needs to be told when to re-check.
+  const [formatTick, setFormatTick] = useState(0);
   useEffect(() => {
     function onSelectionChange() {
+      setFormatTick(t => t + 1);
       const sel = window.getSelection();
       if (!sel || sel.rangeCount === 0) return;
       let node: Node | null = sel.getRangeAt(0).startContainer;
@@ -859,6 +817,47 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     document.addEventListener('selectionchange', onSelectionChange);
     return () => document.removeEventListener('selectionchange', onSelectionChange);
   }, []);
+
+  /** Restores the most recent real in-page selection as the live one — used by controls that
+   *  necessarily steal focus before applying (the font family/size controls below), so the
+   *  browser has something to actually apply the change to instead of nothing. */
+  function restoreLastPageSelection(): boolean {
+    const saved = lastPageSelectionRef.current;
+    if (!saved) return false;
+    saved.page.focus();
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(saved.range);
+    return true;
+  }
+
+  /** A second, deliberately *separate* snapshot from `lastPageSelectionRef` above — that one is
+   *  continuously overwritten on every `selectionchange`, which includes the one a form control
+   *  (a `<select>`, a color `<input>`) fires the instant it steals focus, collapsing the document
+   *  selection *before* that control's own `onChange` ever runs. By the time `onChange` fires,
+   *  `lastPageSelectionRef` would already hold that collapsed, useless selection instead of the
+   *  user's real one. This ref is only ever written explicitly, from a control's own `onMouseDown`
+   *  (still ahead of the focus shift, but not subject to being silently overwritten again after). */
+  const savedFormatSelectionRef = useRef<{ page: HTMLDivElement; range: Range } | null>(null);
+
+  function captureFormatSelection() {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return;
+    let node: Node | null = sel.getRangeAt(0).startContainer;
+    while (node && !(node instanceof HTMLElement)) node = node.parentNode;
+    const page = (node as HTMLElement | null)?.closest('.te-page') as HTMLDivElement | null;
+    if (page) savedFormatSelectionRef.current = { page, range: sel.getRangeAt(0).cloneRange() };
+  }
+
+  function restoreFormatSelection(): boolean {
+    const saved = savedFormatSelectionRef.current;
+    if (!saved) return false;
+    saved.page.focus();
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(saved.range);
+    return true;
+  }
 
   /** Inserts `content` directly at the last real page position via the `Range` API, rather than
    *  restoring focus/selection and going through `execCommand` — deliberately, after finding that
@@ -920,7 +919,9 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     range.insertNode(frag);
 
     const caretRange = document.createRange();
-    caretRange.setStart(freshPara, 0);
+    // setStartBefore, not setStart(freshPara, 0) — see the matching comment on the
+    // pendingHardBreakIdRef effect below, which re-derives this same position after reflow.
+    caretRange.setStartBefore(freshPara);
     caretRange.collapse(true);
     sel.removeAllRanges();
     sel.addRange(caretRange);
@@ -967,82 +968,13 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [renderKey]);
 
-  function handlePageKeyDown(e: React.KeyboardEvent<HTMLDivElement>, pageIndex: number) {
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault();
-      insertHardBreak(pageIndex);
-      return;
-    }
-
-    if (e.key === 'Tab') {
-      const cell = closestCell();
-      if (cell) {
-        e.preventDefault();
-        navigateTableCell(cell, e.shiftKey);
-        return;
-      }
-    }
-
-    const page = pageRefs.current[pageIndex];
-    if (!page) return;
-
-    if (e.key === 'Backspace' && pageIndex > 0) {
-      const sel = window.getSelection();
-      if (sel && sel.isCollapsed && isCaretAtPageStart(page)) {
-        e.preventDefault();
-        mergeIntoPreviousPage(pageIndex);
-        return;
-      }
-    }
-
-    const isVertical = e.key === 'ArrowDown' || e.key === 'ArrowUp';
-    const isHorizontal = e.key === 'ArrowRight' || e.key === 'ArrowLeft';
-    if (!isVertical && !isHorizontal) return;
-
-    const goingForward = e.key === 'ArrowDown' || e.key === 'ArrowRight';
-    const neighborIndex = goingForward ? pageIndex + 1 : pageIndex - 1;
-    if (!pageRefs.current[neighborIndex]) return;
-
-    if (isHorizontal) {
-      const atEdge = goingForward ? isCaretAtPageEnd(page) : isCaretAtPageStart(page);
-      if (atEdge) {
-        e.preventDefault();
-        moveCaretToPageEdge(neighborIndex, goingForward ? 'start' : 'end');
-      }
-      return;
-    }
-
-    // Vertical nav: let the browser's normal line-based movement run first (don't preventDefault),
-    // then check next frame whether the caret actually moved — if it's exactly where it started,
-    // the browser had nowhere further to go (already the first/last visual line on this page).
-    const before = getCaretPosition();
-    requestAnimationFrame(() => {
-      const after = getCaretPosition();
-      if (before && after && before.node === after.node && before.offset === after.offset) {
-        moveCaretToPageEdge(neighborIndex, goingForward ? 'start' : 'end');
-      }
-    });
-  }
-
   // --- Tables: plain <table> HTML manipulated directly, matching this editor's existing
   // execCommand-first / direct-DOM-fallback philosophy. No virtual table data model. ---
-
-  function closestCell(): HTMLTableCellElement | null {
-    const sel = window.getSelection();
-    if (!sel || sel.rangeCount === 0) return null;
-    let node: Node | null = sel.getRangeAt(0).startContainer;
-    while (node && !(node instanceof HTMLElement)) node = node.parentNode;
-    return (node as HTMLElement | null)?.closest('td') ?? null;
-  }
-
-  function placeCaretInCell(cell: HTMLTableCellElement) {
-    const range = document.createRange();
-    range.selectNodeContents(cell);
-    range.collapse(true);
-    const sel = window.getSelection();
-    sel?.removeAllRanges();
-    sel?.addRange(range);
-  }
+  //
+  // Row/column insert/delete goes through the imported findEnclosingCell/addRow/addColumn/
+  // deleteRow/deleteColumn/navigateCell (textEditorTables.ts) — the same functions TableToolbar's
+  // own buttons already call — rather than a second, parallel local implementation. Merge/split
+  // have no library equivalent, so they stay local below.
 
   function makeTableCell(): HTMLTableCellElement {
     const td = document.createElement('td');
@@ -1051,83 +983,6 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     // convention, not visible content.
     td.appendChild(document.createElement('br'));
     return td;
-  }
-
-  /** Tab moves to the next cell (wrapping into the next row); Tab from the last cell of the last
-   *  row synthesizes a fresh row with the same column count, matching Word/Docs. Shift+Tab moves
-   *  backward with no auto-row-add. */
-  function navigateTableCell(cell: HTMLTableCellElement, backwards: boolean) {
-    const row = cell.parentElement;
-    const table = cell.closest('table');
-    if (!row || !table) return;
-
-    if (backwards) {
-      const prevCellInRow = cell.previousElementSibling as HTMLTableCellElement | null;
-      if (prevCellInRow) { placeCaretInCell(prevCellInRow); return; }
-      const prevRow = row.previousElementSibling;
-      const lastOfPrevRow = prevRow?.lastElementChild as HTMLTableCellElement | null;
-      if (lastOfPrevRow) placeCaretInCell(lastOfPrevRow);
-      return;
-    }
-
-    const nextCellInRow = cell.nextElementSibling as HTMLTableCellElement | null;
-    if (nextCellInRow) { placeCaretInCell(nextCellInRow); return; }
-    const nextRow = row.nextElementSibling;
-    const firstOfNextRow = nextRow?.firstElementChild as HTMLTableCellElement | null;
-    if (firstOfNextRow) { placeCaretInCell(firstOfNextRow); return; }
-
-    const newRow = document.createElement('tr');
-    for (let i = 0; i < row.children.length; i++) newRow.appendChild(makeTableCell());
-    table.querySelector('tbody')?.appendChild(newRow);
-    const firstOfNewRow = newRow.firstElementChild as HTMLTableCellElement | null;
-    if (firstOfNewRow) placeCaretInCell(firstOfNewRow);
-    handleInput();
-  }
-
-  function insertTableRow(cell: HTMLTableCellElement, after: boolean) {
-    const row = cell.parentElement;
-    if (!row?.parentElement) return;
-    const newRow = document.createElement('tr');
-    for (let i = 0; i < row.children.length; i++) newRow.appendChild(makeTableCell());
-    row.parentElement.insertBefore(newRow, after ? row.nextElementSibling : row);
-    handleInput();
-  }
-
-  function insertTableColumn(cell: HTMLTableCellElement, after: boolean) {
-    const table = cell.closest('table');
-    const row = cell.parentElement;
-    if (!table || !row) return;
-    const colIndex = Array.from(row.children).indexOf(cell);
-    table.querySelectorAll('tr').forEach((tr) => {
-      const refCell = tr.children[colIndex] as ChildNode | undefined;
-      tr.insertBefore(makeTableCell(), after ? (refCell?.nextSibling ?? null) : (refCell ?? null));
-    });
-    handleInput();
-  }
-
-  /** Removing a table's only remaining row/column removes the whole table rather than leaving a
-   *  degenerate empty one behind. */
-  function deleteTableRow(cell: HTMLTableCellElement) {
-    const row = cell.parentElement;
-    const table = cell.closest('table');
-    const tbody = table?.querySelector('tbody');
-    if (!row || !table || !tbody) return;
-    if (tbody.children.length <= 1) table.remove();
-    else row.remove();
-    handleInput();
-  }
-
-  function deleteTableColumn(cell: HTMLTableCellElement) {
-    const table = cell.closest('table');
-    const row = cell.parentElement;
-    if (!table || !row) return;
-    const colIndex = Array.from(row.children).indexOf(cell);
-    if (row.children.length <= 1) {
-      table.remove();
-    } else {
-      table.querySelectorAll('tr').forEach((tr) => { tr.children[colIndex]?.remove(); });
-    }
-    handleInput();
   }
 
   /** Merge is scoped to "this cell + its right neighbor" and Split to undoing a colSpan — a
@@ -1195,7 +1050,6 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
   }
 
   const [tableMenu, setTableMenu] = useState<{ cell: HTMLTableCellElement; x: number; y: number } | null>(null);
-  const [imageMenu, setImageMenu] = useState<{ img: HTMLImageElement; x: number; y: number } | null>(null);
 
   function addDoc() {
     const based = getDocsWithLiveContent();
@@ -1292,6 +1146,16 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     pageSeedRef.current = target?.pages ?? [''];
     setActiveDocId(id);
     setRenderKey(k => k + 1);
+    // Every one of these references a DOM node or Range that belongs to the outgoing document's
+    // pages, which are about to unmount (renderKey bump above). Left set, they'd point at
+    // detached nodes — a stray/broken selection or resize overlay bleeding onto whichever
+    // document is switched to next.
+    setSelectedImage(null);
+    setImageContextMenuPos(null);
+    setActiveTable(null);
+    setTableFullySelected(false);
+    setTableMenu(null);
+    setMarkMenuPos(null);
   }
 
   const [dragTabId, setDragTabId] = useState<string | null>(null);
@@ -1312,34 +1176,23 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
 
   const [tabMenu, setTabMenu] = useState<{ docId: string; x: number; y: number } | null>(null);
 
-  function runSpellCheck() {
-    if (!activeDoc) return;
-    const pages = captureActiveDocPages().map(html => markMisspellings(stripSpellMarks(html)));
-    const total = pages.reduce((sum, html) => {
-      const container = document.createElement('div');
-      container.innerHTML = html;
-      return sum + findAllSpellIssues(container.innerText).length;
-    }, 0);
-    commitActiveDocPages(pages);
-    setRenderKey(k => k + 1);
-    setSpellReport(total);
-    scheduleAutosave();
+  /** Native browser spellcheck only — toggles the `spellcheck` DOM property directly on every
+   *  page's contentEditable, imperatively, rather than passing it down as an EditablePage prop.
+   *  EditablePage must never re-render past its initial mount (see its own comment) — a prop here
+   *  would trigger exactly that. The browser underlines misspelled words and offers its own
+   *  right-click suggestions; nothing here ever touches page content, so there's nothing that can
+   *  lose or corrupt text the way the old dictionary-based implementation could (it rewrote every
+   *  page's innerHTML and forced a full remount just to apply/clear marks). */
+  const [spellCheckActive, setSpellCheckActive] = useState(true);
+  function toggleSpellCheck() {
+    setSpellCheckActive(v => !v);
   }
-
-  function clearSpellMarks() {
-    if (!activeDoc) return;
-    commitActiveDocPages(captureActiveDocPages().map(stripSpellMarks));
-    setRenderKey(k => k + 1);
-    setSpellReport(null);
-  }
+  useEffect(() => {
+    pageRefs.current.forEach((p) => { if (p) p.spellcheck = spellCheckActive; });
+  });
 
   function runPageClickLogic(e: React.MouseEvent) {
     const target = e.target as HTMLElement;
-    if (target.classList.contains('spell-miss')) {
-      target.replaceWith(document.createTextNode(target.dataset.fix ?? target.textContent ?? ''));
-      scheduleAutosave();
-      return;
-    }
     if (target.tagName === 'IMG') {
       setSelectedImage(target as HTMLImageElement);
       setActiveTable(null);
@@ -1383,33 +1236,89 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
         return;
       }
     }
-    if (!activeTable) return;
-    if (e.key === 'Tab') {
-      const cell = findEnclosingCell(window.getSelection()?.anchorNode ?? null);
-      if (!cell) return;
-      e.preventDefault();
-      navigateCell(activeTable, cell, e.shiftKey ? 'prev' : 'next');
-      scheduleAutosave();
-      reflow();
-      return;
-    }
-    if ((e.key === 'Delete' || e.key === 'Backspace') && tableFullySelected) {
-      e.preventDefault();
-      const restore = deleteTable(activeTable);
-      setActiveTable(null);
-      setTableFullySelected(false);
-      if (restore) restoreCaretAt(restore);
-      scheduleAutosave();
-      reflow();
-      return;
-    }
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
-      const cell = findEnclosingCell(window.getSelection()?.anchorNode ?? null);
-      if (cell) {
+    if (activeTable) {
+      if (e.key === 'Tab') {
+        const cell = findEnclosingCell(window.getSelection()?.anchorNode ?? null);
+        if (cell) {
+          e.preventDefault();
+          navigateCell(activeTable, cell, e.shiftKey ? 'prev' : 'next');
+          scheduleAutosave();
+          reflow();
+          return;
+        }
+      }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && tableFullySelected) {
         e.preventDefault();
-        setTableFullySelected(true);
+        const restore = deleteTable(activeTable);
+        setActiveTable(null);
+        setTableFullySelected(false);
+        if (restore) restoreCaretAt(restore);
+        scheduleAutosave();
+        reflow();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+        const cell = findEnclosingCell(window.getSelection()?.anchorNode ?? null);
+        if (cell) {
+          e.preventDefault();
+          setTableFullySelected(true);
+          return;
+        }
       }
     }
+
+    // Page-level navigation (formerly a separate handlePageKeyDown taking an explicit page
+    // index) — derives which page the event landed on from the live DOM instead, since
+    // EditablePage's onKeyDown prop must stay a single stable callback for its memo to hold
+    // (see the audit comment above EditablePage).
+    const pageIndex = pageRefs.current.indexOf(e.currentTarget as HTMLDivElement);
+    if (pageIndex === -1) return;
+
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      insertHardBreak(pageIndex);
+      return;
+    }
+
+    const page = pageRefs.current[pageIndex];
+    if (!page) return;
+
+    if (e.key === 'Backspace' && pageIndex > 0) {
+      const sel = window.getSelection();
+      if (sel && sel.isCollapsed && isCaretAtPageStart(page)) {
+        e.preventDefault();
+        mergeIntoPreviousPage(pageIndex);
+        return;
+      }
+    }
+
+    const isVertical = e.key === 'ArrowDown' || e.key === 'ArrowUp';
+    const isHorizontal = e.key === 'ArrowRight' || e.key === 'ArrowLeft';
+    if (!isVertical && !isHorizontal) return;
+
+    const goingForward = e.key === 'ArrowDown' || e.key === 'ArrowRight';
+    const neighborIndex = goingForward ? pageIndex + 1 : pageIndex - 1;
+    if (!pageRefs.current[neighborIndex]) return;
+
+    if (isHorizontal) {
+      const atEdge = goingForward ? isCaretAtPageEnd(page) : isCaretAtPageStart(page);
+      if (atEdge) {
+        e.preventDefault();
+        moveCaretToPageEdge(neighborIndex, goingForward ? 'start' : 'end');
+      }
+      return;
+    }
+
+    // Vertical nav: let the browser's normal line-based movement run first (don't preventDefault),
+    // then check next frame whether the caret actually moved — if it's exactly where it started,
+    // the browser had nowhere further to go (already the first/last visual line on this page).
+    const before = getCaretPosition();
+    requestAnimationFrame(() => {
+      const after = getCaretPosition();
+      if (before && after && before.node === after.node && before.offset === after.offset) {
+        moveCaretToPageEdge(neighborIndex, goingForward ? 'start' : 'end');
+      }
+    });
   }
   runKeyDownLogicRef.current = runKeyDownLogic;
 
@@ -1425,8 +1334,12 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     if (table) {
       e.preventDefault();
       setActiveTable(table);
-      activeTableCellRef.current = findEnclosingCell(target);
-      setTableContextMenuPos({ x: e.clientX, y: e.clientY });
+      const cell = findEnclosingCell(target);
+      activeTableCellRef.current = cell;
+      // Insert/delete row/column/table are already reachable via TableToolbar (which appears
+      // whenever activeTable is set, right above) — this popover only needs to cover what
+      // TableToolbar can't: merge/split, which need a specific target cell.
+      if (cell) setTableMenu({ cell, x: e.clientX, y: e.clientY });
       return;
     }
     const sel = window.getSelection();
@@ -1453,9 +1366,12 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
   function alignSelectedImage(align: 'left' | 'center' | 'right') {
     if (!selectedImage) return;
     if (align === 'left') {
-      selectedImage.style.cssFloat = 'left';
-      selectedImage.style.display = 'inline-block';
-      selectedImage.style.margin = '0 8px 8px 0';
+      // "Left" is the default, plain-inline state — flows inline with surrounding text like any
+      // other inline element (the same state a freshly-inserted image already starts in), not a
+      // float. Floating left would instead wrap text around the image's right edge.
+      selectedImage.style.cssFloat = 'none';
+      selectedImage.style.display = 'inline';
+      selectedImage.style.margin = '';
     } else if (align === 'right') {
       selectedImage.style.cssFloat = 'right';
       selectedImage.style.display = 'inline-block';
@@ -1672,11 +1588,10 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     handleInput();
   }
 
-  // Live, 800ms-debounced content analysis: marks misspellings directly on the live page DOM (no
-  // captureActiveDocPages/commitActiveDocPages/renderKey bump — that path is only safe for the
-  // explicit "Spell Check" button click above, not as a background side effect of typing) so it
-  // never disrupts the caret mid-keystroke, and recomputes the status bar's word/char counts in
-  // the same pass — one debounce timer doing both jobs rather than two independently racing ones.
+  // Live, 800ms-debounced word/char count — reads the live page DOM directly (no
+  // captureActiveDocPages/commitActiveDocPages/renderKey bump) so it never disrupts the caret
+  // mid-keystroke. Spell checking itself is the browser's own native `spellCheck` attribute (see
+  // EditablePage/toggleSpellCheck) — this pass no longer does any of its own DOM marking.
   const [wordCount, setWordCount] = useState(0);
   const [charCount, setCharCount] = useState(0);
   const [charCountNoSpaces, setCharCountNoSpaces] = useState(0);
@@ -1684,12 +1599,9 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
   function scheduleContentAnalysis() {
     if (spellTimeoutRef.current) clearTimeout(spellTimeoutRef.current);
     spellTimeoutRef.current = setTimeout(() => {
-      const sel = window.getSelection();
-      const skipNode = sel && sel.rangeCount > 0 ? sel.getRangeAt(0).startContainer : null;
       let text = '';
       pageRefs.current.forEach((page) => {
         if (!page) return;
-        markMisspellingsLive(page, skipNode);
         text += `${page.innerText}\n`;
       });
       const words = text.trim().split(/\s+/).filter(Boolean);
@@ -1844,7 +1756,7 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
   }
 
   /** Replace All is a discrete, explicit bulk action — unlike live highlighting, a full remount
-   *  here is fine (same category as the "Spell Check" button click). */
+   *  here is fine (same category as inserting a table or a hard page break). */
   function replaceInDoc() {
     if (!query.trim() || !activeDoc) return;
     const regex = buildFindRegex();
@@ -2021,24 +1933,24 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     swalToast({ icon: 'success', title: 'Sent to TypeR — opening the Studio…' });
   }
 
-  const toolbarButtons = useMemo(() => [
+  const toolbarButtons: ToolbarButtonDef[] = useMemo(() => [
     { icon: Undo2, label: 'Undo', run: () => exec('undo') },
     { icon: Redo2, label: 'Redo', run: () => exec('redo') },
-    { icon: Bold, label: 'Bold', run: () => exec('bold') },
-    { icon: Italic, label: 'Italic', run: () => exec('italic') },
-    { icon: Underline, label: 'Underline', run: () => exec('underline') },
-    { icon: Strikethrough, label: 'Strikethrough', run: () => exec('strikeThrough') },
-    { icon: Heading1, label: 'Heading 1', run: () => exec('formatBlock', 'H1') },
-    { icon: Heading2, label: 'Heading 2', run: () => exec('formatBlock', 'H2') },
-    { icon: Heading3, label: 'Heading 3', run: () => exec('formatBlock', 'H3') },
-    { icon: Heading4, label: 'Heading 4', run: () => exec('formatBlock', 'H4') },
-    { icon: List, label: 'Bulleted list', run: () => exec('insertUnorderedList') },
-    { icon: ListOrdered, label: 'Numbered list', run: () => exec('insertOrderedList') },
-    { icon: AlignLeft, label: 'Align left', run: () => exec('justifyLeft') },
-    { icon: AlignCenter, label: 'Align center', run: () => exec('justifyCenter') },
-    { icon: AlignRight, label: 'Align right', run: () => exec('justifyRight') },
+    { icon: Bold, label: 'Bold', run: () => exec('bold'), command: 'bold' },
+    { icon: Italic, label: 'Italic', run: () => exec('italic'), command: 'italic' },
+    { icon: Underline, label: 'Underline', run: () => exec('underline'), command: 'underline' },
+    { icon: Strikethrough, label: 'Strikethrough', run: () => exec('strikeThrough'), command: 'strikeThrough' },
+    { icon: Heading1, label: 'Heading 1', run: () => toggleFormatBlock('H1'), blockTag: 'H1' },
+    { icon: Heading2, label: 'Heading 2', run: () => toggleFormatBlock('H2'), blockTag: 'H2' },
+    { icon: Heading3, label: 'Heading 3', run: () => toggleFormatBlock('H3'), blockTag: 'H3' },
+    { icon: Heading4, label: 'Heading 4', run: () => toggleFormatBlock('H4'), blockTag: 'H4' },
+    { icon: List, label: 'Bulleted list', run: () => exec('insertUnorderedList'), command: 'insertUnorderedList' },
+    { icon: ListOrdered, label: 'Numbered list', run: () => exec('insertOrderedList'), command: 'insertOrderedList' },
+    { icon: AlignLeft, label: 'Align left', run: () => exec('justifyLeft'), command: 'justifyLeft' },
+    { icon: AlignCenter, label: 'Align center', run: () => exec('justifyCenter'), command: 'justifyCenter' },
+    { icon: AlignRight, label: 'Align right', run: () => exec('justifyRight'), command: 'justifyRight' },
     { icon: TableIcon, label: 'Insert Table', run: () => void handleInsertTable() },
-    { icon: AlignJustify, label: 'Justify', run: () => exec('justifyFull') },
+    { icon: AlignJustify, label: 'Justify', run: () => exec('justifyFull'), command: 'justifyFull' },
     { icon: IndentIncrease, label: 'Increase indent', run: () => exec('indent') },
     { icon: IndentDecrease, label: 'Decrease indent', run: () => exec('outdent') },
   ], []);
@@ -2056,7 +1968,7 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     redo: () => exec('redo'),
     openFind: () => openFindPanel('find'),
     openFindReplace: () => openFindPanel('replace'),
-    runSpellCheck,
+    toggleSpellCheck,
     zoomIn: () => setZoom(z => Math.min(2, Math.round((z + 0.1) * 10) / 10)),
     zoomOut: () => setZoom(z => Math.max(0.5, Math.round((z - 0.1) * 10) / 10)),
     zoomReset: () => setZoom(1),
@@ -2122,8 +2034,8 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
         onDelete={closeDoc}
         onToggleStatus={toggleDocStatus}
       />
-      <div className="flex flex-col flex-1 min-w-0 h-full min-h-0">
-    <div ref={rootRef} className="flex flex-col h-full min-h-0">
+      <div ref={rootRef} className="flex flex-col flex-1 min-w-0 h-full min-h-0">
+    <div className="flex flex-col h-full min-h-0">
       <TextEditorMenuBar actions={menuActions} />
 
       {/* Document tabs */}
@@ -2198,16 +2110,20 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
         <IconButton size="sm" aria-label={isFullscreen ? 'Exit full screen' : 'Full screen'} title={isFullscreen ? 'Exit full screen' : 'Full screen'} onClick={toggleFullscreen} className="!bg-transparent shrink-0">
           {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
         </IconButton>
-        <IconButton size="sm" aria-label="Toggle split screen" title="Split screen: page preview" active={splitScreen} onClick={() => setSplitScreen(v => !v)} className="!bg-transparent shrink-0">
-          <Columns2 size={14} />
-        </IconButton>
       </div>
 
       {/* Formatting toolbar */}
       <div className="flex items-center gap-0.5 px-3 h-11 shrink-0 border-b border-hairline overflow-x-auto">
         <select
           defaultValue=""
-          onChange={(e) => { if (e.target.value) exec('fontName', e.target.value); e.target.value = ''; }}
+          onMouseDown={captureFormatSelection}
+          onChange={(e) => {
+            // Opening/using the dropdown steals focus from the page, same issue font size has —
+            // restore the selection captured on this control's own mousedown, above, before it
+            // had the chance to steal focus.
+            if (e.target.value) { restoreFormatSelection(); exec('fontName', e.target.value); }
+            e.target.value = '';
+          }}
           className="h-7 bg-ink/5 border border-hairline rounded-md px-1.5 text-xs text-ink"
           aria-label="Font family"
         >
@@ -2220,6 +2136,7 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
             inputMode="numeric"
             aria-label="Font size"
             value={fontSizeInput}
+            onMouseDown={captureFormatSelection}
             onChange={(e) => setFontSizeInput(e.target.value)}
             onFocus={(e) => e.target.select()}
             onBlur={(e) => commitFontSizeInput(e.target.value)}
@@ -2228,43 +2145,64 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
           />
           <div className="flex flex-col border-l border-hairline shrink-0">
             <button
-              type="button" aria-label="Increase font size" onClick={() => stepFontSize(FONT_SIZE_STEP)}
+              type="button" aria-label="Increase font size" onMouseDown={captureFormatSelection} onClick={() => stepFontSize(FONT_SIZE_STEP)}
               className="h-3.5 w-4 flex items-center justify-center text-ink-faint hover:text-ink hover:bg-ink/10 leading-none"
             >
               <ChevronUp size={9} />
             </button>
             <button
-              type="button" aria-label="Decrease font size" onClick={() => stepFontSize(-FONT_SIZE_STEP)}
+              type="button" aria-label="Decrease font size" onMouseDown={captureFormatSelection} onClick={() => stepFontSize(-FONT_SIZE_STEP)}
               className="h-3.5 w-4 flex items-center justify-center text-ink-faint hover:text-ink hover:bg-ink/10 leading-none border-t border-hairline"
             >
               <ChevronDown size={9} />
             </button>
           </div>
         </div>
-        <input type="color" title="Text color" onChange={(e) => exec('foreColor', e.target.value)} className="w-6 h-6 rounded cursor-pointer border border-hairline bg-transparent" />
-        <input type="color" title="Highlight color" defaultValue="#ffff00" onChange={(e) => applyHighlight(e.target.value)} className="w-6 h-6 rounded cursor-pointer border border-hairline bg-transparent" />
+        <input type="color" title="Text color" onMouseDown={captureFormatSelection} onChange={(e) => { restoreFormatSelection(); exec('foreColor', e.target.value); }} className="w-6 h-6 rounded cursor-pointer border border-hairline bg-transparent" />
+        <input type="color" title="Highlight color" defaultValue="#ffff00" onMouseDown={captureFormatSelection} onChange={(e) => { restoreFormatSelection(); applyHighlight(e.target.value); }} className="w-6 h-6 rounded cursor-pointer border border-hairline bg-transparent" />
         <div className="w-px h-5 bg-hairline mx-1.5" />
-        {toolbarButtons.map(({ icon: Icon, label, run }) => (
-          <IconButton key={label} size="sm" aria-label={label} title={label} onClick={run} className="!bg-transparent">
-            <Icon size={14} />
-          </IconButton>
-        ))}
+        {toolbarButtons.map(({ icon: Icon, label, run, command, blockTag }) => {
+          const active = command
+            ? document.queryCommandState(command)
+            : blockTag
+            ? document.queryCommandValue('formatBlock').toLowerCase() === blockTag.toLowerCase()
+            : false;
+          return (
+            <IconButton
+              key={label}
+              size="sm"
+              aria-label={label}
+              title={label}
+              active={active}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={run}
+              className="!bg-transparent"
+            >
+              <Icon size={14} />
+            </IconButton>
+          );
+        })}
         <IconButton
           size="sm"
           aria-label="Right to left"
           title="Toggle Right-to-Left"
           active={activeDoc?.dir === 'rtl'}
+          onMouseDown={(e) => e.preventDefault()}
           onClick={toggleDir}
           className="!bg-transparent"
         >
           <Languages size={14} />
         </IconButton>
         <div className="w-px h-5 bg-hairline mx-1.5" />
-        <Button size="sm" variant="secondary" onClick={runSpellCheck}>Spell Check</Button>
-        {spellReport !== null && (
-          <span className="text-[11px] text-ink-faint px-1">{spellReport === 0 ? 'No issues' : `${spellReport} issue(s)`}</span>
-        )}
-        {spellReport !== null && <Button size="sm" variant="ghost" onClick={clearSpellMarks}>Clear</Button>}
+        <Button
+          size="sm"
+          variant={spellCheckActive ? 'primary' : 'secondary'}
+          aria-pressed={spellCheckActive}
+          title={spellCheckActive ? 'Spell check on — click to turn off' : 'Spell check off — click to turn on'}
+          onClick={toggleSpellCheck}
+        >
+          Spell Check
+        </Button>
         <div className="flex-1" />
         <Button size="sm" variant="secondary" onClick={handleSendToTyper}><Send size={13} /> Send to TypeR</Button>
         <Button size="sm" variant="secondary" onClick={() => activeDoc && exportDocAsTxt({ ...activeDoc, pages: capturePagesForExport() })}>
@@ -2328,19 +2266,28 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
       )}
 
       {/* Pages */}
-      <div className="flex-1 min-h-0 overflow-auto bg-[#e9e9ec] dark:bg-[#2a2a2a] flex flex-col items-center gap-6 py-8">
+      <div className="flex-1 min-h-0 overflow-auto bg-[#e5e7eb] dark:bg-[#1e1e1e] flex flex-col items-center gap-6 py-8">
         {activeDoc && (
           <div key={`${activeDoc.id}-${renderKey}`} className="flex flex-col items-center gap-6" dir={activeDoc.dir}>
             {activeDoc.pages.map((html, i) => (
-              <EditablePage
-                key={i}
-                initialHtml={html}
-                pageRef={getPageRefCallback(i)}
-                onInput={handleInput}
-                onClick={handlePageClick}
-                onKeyDown={handleKeyDown}
-                onContextMenu={handleContextMenu}
-              />
+              <div key={i} className="shrink-0 relative" style={{ width: PAGE_WIDTH * zoom, height: PAGE_HEIGHT * zoom }}>
+                <div
+                  className="overflow-hidden rounded-sm shadow-2xl"
+                  style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT, transform: `scale(${zoom})`, transformOrigin: 'top left' }}
+                >
+                  <EditablePage
+                    initialHtml={html}
+                    pageRef={getPageRefCallback(i)}
+                    onInput={handleInput}
+                    onClick={handlePageClick}
+                    onKeyDown={handleKeyDown}
+                    onContextMenu={handleContextMenu}
+                  />
+                </div>
+                <div className="absolute bottom-1 inset-x-0 text-center text-[11px] text-ink-faint pointer-events-none select-none">
+                  {i + 1} / {activeDoc.pages.length}
+                </div>
+              </div>
             ))}
           </div>
         )}
@@ -2369,20 +2316,6 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
           onDeleteCol={handleDeleteColAction}
           onDeleteTable={handleDeleteTableAction}
         />
-      )}
-      {tableContextMenuPos && (
-        <div
-          ref={tableContextMenuRef}
-          className="fixed z-50 bg-elevated border border-hairline rounded-md shadow-panel py-1"
-          style={{ top: tableContextMenuPos.y, left: tableContextMenuPos.x }}
-        >
-          <button
-            className="block w-full text-left text-[12px] px-3 py-1.5 hover:bg-ink/10 text-danger whitespace-nowrap"
-            onClick={() => { handleDeleteTableAction(); setTableContextMenuPos(null); }}
-          >
-            Delete Table
-          </button>
-        </div>
       )}
       {selectedImage && (
         <ImageControls
@@ -2435,87 +2368,6 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
           </button>
         </div>
       )}
-      {/* Pages + optional split-screen page preview */}
-      <div className="flex-1 min-h-0 flex overflow-hidden">
-        <div
-          className="min-h-0 overflow-auto bg-ink/[0.03] flex flex-col items-center gap-6 py-8"
-          style={{ width: splitScreen ? `${splitRatio * 100}%` : '100%' }}
-        >
-          {activeDoc && (
-            <div key={`${activeDoc.id}-${renderKey}`} className="flex flex-col items-center gap-6" dir={activeDoc.dir}>
-              {activeDoc.pages.map((_, i) => (
-                <div key={i} className="shrink-0 relative" style={{ width: PAGE_WIDTH * zoom, height: PAGE_HEIGHT * zoom }}>
-                  <div
-                    className="overflow-hidden rounded-sm shadow-2xl"
-                    style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT, transform: `scale(${zoom})`, transformOrigin: 'top left' }}
-                  >
-                    <div
-                      ref={(el) => { pageRefs.current[i] = el; }}
-                      contentEditable
-                      suppressContentEditableWarning
-                      spellCheck
-                      dangerouslySetInnerHTML={{ __html: pageSeedRef.current[i] ?? '' }}
-                      onInput={handleInput}
-                      onClick={handlePageClick}
-                      onKeyDown={(e) => handlePageKeyDown(e, i)}
-                      onContextMenu={(e) => {
-                        const target = e.target as HTMLElement;
-                        const cell = target.closest('td');
-                        if (cell) { e.preventDefault(); setTableMenu({ cell, x: e.clientX, y: e.clientY }); return; }
-                        if (target instanceof HTMLImageElement) { e.preventDefault(); setImageMenu({ img: target, x: e.clientX, y: e.clientY }); }
-                      }}
-                      className="te-page bg-white text-black px-16 py-16 text-[15px] leading-relaxed outline-none overflow-hidden"
-                      style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT, minHeight: PAGE_HEIGHT }}
-                    />
-                  </div>
-                  <div className="absolute bottom-1 inset-x-0 text-center text-[11px] text-ink-faint pointer-events-none select-none">
-                    {i + 1} / {activeDoc.pages.length}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {splitScreen && (
-          <>
-            <div
-              onPointerDown={handleSplitDividerPointerDown}
-              className="w-1.5 shrink-0 cursor-col-resize bg-hairline hover:bg-accent transition-colors"
-            />
-            <div className="flex-1 min-h-0 flex flex-col border-l border-hairline">
-              <div className="flex items-center justify-center gap-1.5 h-9 shrink-0 border-b border-hairline text-[11px] text-ink-faint">
-                <IconButton
-                  size="sm" aria-label="Previous page" onClick={() => setPreviewPageIndex(i => Math.max(0, i - 1))}
-                  disabled={clampedPreviewIndex <= 0} className="!bg-transparent !w-6 !h-6"
-                >
-                  <ChevronLeft size={13} />
-                </IconButton>
-                <input
-                  type="number" min={1} max={Math.max(1, previewPages.length)}
-                  value={previewPages.length > 0 ? clampedPreviewIndex + 1 : 0}
-                  onChange={(e) => setPreviewPageIndex(Math.max(0, Math.min(previewPages.length - 1, Number(e.target.value) - 1)))}
-                  className="w-11 bg-ink/5 border border-hairline rounded-md px-1 py-0.5 text-xs text-ink text-center"
-                />
-                <span>of {previewPages.length}</span>
-                <IconButton
-                  size="sm" aria-label="Next page" onClick={() => setPreviewPageIndex(i => Math.min(previewPages.length - 1, i + 1))}
-                  disabled={clampedPreviewIndex >= previewPages.length - 1} className="!bg-transparent !w-6 !h-6"
-                >
-                  <ChevronRight size={13} />
-                </IconButton>
-              </div>
-              <div className="flex-1 min-h-0 overflow-auto flex items-center justify-center bg-ink/[0.03] p-4">
-                {previewPages[clampedPreviewIndex] ? (
-                  <img src={previewPages[clampedPreviewIndex]} alt={`Manga page ${clampedPreviewIndex + 1}`} className="max-w-full max-h-full object-contain shadow-2xl" />
-                ) : (
-                  <span className="text-xs text-ink-faint">No page to preview — open a chapter in Library</span>
-                )}
-              </div>
-            </div>
-          </>
-        )}
-      </div>
 
       {/* Status bar */}
       {activeDoc && (
@@ -2562,27 +2414,8 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
           y={tableMenu.y}
           onClose={() => setTableMenu(null)}
           items={[
-            { label: 'Insert Row Above', onSelect: () => insertTableRow(tableMenu.cell, false) },
-            { label: 'Insert Row Below', onSelect: () => insertTableRow(tableMenu.cell, true) },
-            { label: 'Insert Column Left', onSelect: () => insertTableColumn(tableMenu.cell, false) },
-            { label: 'Insert Column Right', onSelect: () => insertTableColumn(tableMenu.cell, true) },
-            { label: 'Delete Row', onSelect: () => deleteTableRow(tableMenu.cell) },
-            { label: 'Delete Column', onSelect: () => deleteTableColumn(tableMenu.cell) },
             { label: 'Merge with Right Cell', onSelect: () => mergeTableCellRight(tableMenu.cell) },
             { label: 'Split Cell', onSelect: () => splitTableCell(tableMenu.cell), disabled: (tableMenu.cell.colSpan || 1) <= 1 },
-          ]}
-        />
-      )}
-
-      {imageMenu && (
-        <SimplePopoverMenu
-          x={imageMenu.x}
-          y={imageMenu.y}
-          onClose={() => setImageMenu(null)}
-          items={[
-            { label: 'Align Left', onSelect: () => alignImage(imageMenu.img, 'left') },
-            { label: 'Align Center', onSelect: () => alignImage(imageMenu.img, 'center') },
-            { label: 'Align Right', onSelect: () => alignImage(imageMenu.img, 'right') },
           ]}
         />
       )}

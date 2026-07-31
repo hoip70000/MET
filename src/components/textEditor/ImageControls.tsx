@@ -53,6 +53,8 @@ export function ImageControls({ image, onDelete, onResizeCommit }: ImageControls
   function startResize(handle: HandlePos, e: React.PointerEvent) {
     e.preventDefault();
     e.stopPropagation();
+    const target = e.currentTarget;
+    target.setPointerCapture(e.pointerId);
     const startX = e.clientX;
     const startY = e.clientY;
     const startRect = image.getBoundingClientRect();
@@ -61,6 +63,7 @@ export function ImageControls({ image, onDelete, onResizeCommit }: ImageControls
     const ratio = startH === 0 ? 1 : startW / startH;
     const signX = handle.includes('w') ? -1 : handle.includes('e') ? 1 : 0;
     const signY = handle.includes('n') ? -1 : handle.includes('s') ? 1 : 0;
+    const isCorner = signX !== 0 && signY !== 0;
 
     function onMove(ev: PointerEvent) {
       const dx = ev.clientX - startX;
@@ -68,14 +71,10 @@ export function ImageControls({ image, onDelete, onResizeCommit }: ImageControls
       let newW = startW + (signX !== 0 ? dx * signX : 0);
       let newH = startH + (signY !== 0 ? dy * signY : 0);
 
-      if (!ev.shiftKey) {
-        if (signX !== 0 && signY !== 0) {
-          if (Math.abs(dx) > Math.abs(dy)) newH = newW / ratio; else newW = newH * ratio;
-        } else if (signX !== 0) {
-          newH = newW / ratio;
-        } else if (signY !== 0) {
-          newW = newH * ratio;
-        }
+      // Corner drags maintain aspect ratio by default, Shift frees them. Edge drags only ever
+      // change the single axis they're on — never coupled to the other dimension, Shift or not.
+      if (isCorner && !ev.shiftKey) {
+        if (Math.abs(dx) > Math.abs(dy)) newH = newW / ratio; else newW = newH * ratio;
       }
 
       newW = Math.max(MIN_SIZE, newW);
@@ -90,6 +89,7 @@ export function ImageControls({ image, onDelete, onResizeCommit }: ImageControls
     function onUp() {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      target.releasePointerCapture(e.pointerId);
       setDragDims(null);
       onResizeCommit();
     }
