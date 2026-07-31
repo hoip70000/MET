@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Home, Radio } from 'lucide-react';
 import { cn, IconButton, Modal } from '../ui';
 import type { Page, ProcessedImage } from '../../types';
 import { StudioToolbar } from './StudioToolbar';
@@ -56,6 +57,14 @@ import { MagicEraseLoadingOverlay } from './MagicEraseLoadingOverlay';
 import { detectTextRegions, type TextRegion } from '../../lib/textDetect';
 import { callMagicErase, MagicEraseError } from '../../lib/magicErase';
 import { loadMagicEraseServer } from '../../lib/magicEraseStore';
+import { supabase } from '../../lib/supabaseClient';
+import {
+  startStudioSession, endStudioSession, listHostableTeams, joinStudioSessionChannel,
+  type StudioCollabPeer, type StudioSessionRow, type StudioCollabHandle,
+} from '../../lib/studioCollab';
+import { CollabCursors } from './CollabCursors';
+import { CollabViewerCanvas } from './CollabViewerCanvas';
+import { CollabSessionPanel, type CollabChatMessage } from './CollabSessionPanel';
 import {
   loadChapterStudioData, saveChapterStudioData, pushVersionSnapshot, STUDIO_SCHEMA_VERSION,
   type ChapterStudioData, type SerializedStudioLayer,
@@ -76,6 +85,10 @@ interface StudioProps {
   /** Project > Export as .msp — the existing workspace-level .msp export (App.tsx), threaded down so
    *  it's reachable from inside a chapter without Studio needing the whole `Workspace` object itself. */
   onExportMsp?: () => void;
+  /** Set when this mount is a spectator joining someone else's live session (from a chapter card's
+   *  "Live" badge) rather than a normal editing session — renders a read-only viewer shell instead
+   *  of the full edit UI, and never mounts the real Konva StudioCanvas at all. */
+  viewOnlySession?: { sessionId: string; teamId: string } | null;
 }
 
 export function Studio(props: StudioProps) {
@@ -90,12 +103,126 @@ export function Studio(props: StudioProps) {
   );
 }
 
-function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript, onConsumePendingTyperScript, onPagesChange, onExportMsp }: StudioProps) {
+function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript, onConsumePendingTyperScript, onPagesChange, onExportMsp, viewOnlySession }: StudioProps) {
   const canvasRef = useRef<StudioCanvasHandle>(null);
+
+  // Live collab (spectator mode) — a hosted session for this chapter, joined either as the host
+  // (via "Go Live" below) or as a viewer (viewOnlySession, set by App.tsx when opened from a
+  // chapter's "Live" badge). See src/lib/studioCollab.ts for the underlying presence/broadcast
+  // plumbing this all rides on.
+  const [liveSession, setLiveSession] = useState<StudioSessionRow | null>(null);
+  const [collabSelf, setCollabSelf] = useState<{ id: string; name: string } | null>(null);
+  const [collabPeers, setCollabPeers] = useState<StudioCollabPeer[]>([]);
+  const [collabMessages, setCollabMessages] = useState<CollabChatMessage[]>([]);
+  const [collabCursors, setCollabCursors] = useState<Record<string, { name: string; x: number; y: number }>>({});
+  const [viewerFrame, setViewerFrame] = useState<string | null>(null);
+  const [goingLive, setGoingLive] = useState(false);
+  const collabHandleRef = useRef<StudioCollabHandle | null>(null);
+  const isHostingLive = !!liveSession && !viewOnlySession;
+  const panelLayout = usePanelLayout();
+
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => {
+      if (!data.user) return;
+      const name = (data.user.user_metadata as { name?: string } | undefined)?.name || data.user.email || 'Someone';
+      setCollabSelf({ id: data.user.id, name });
+    });
+  }, []);
+
+  // Joining as a viewer is driven entirely by the viewOnlySession prop (set once, by whoever
+  // opened this mount) — there's no "Go Live" equivalent gesture for a viewer to trigger this.
+  useEffect(() => {
+    if (!viewOnlySession || !collabSelf) return;
+    const handle = joinStudioSessionChannel(
+      viewOnlySession.sessionId,
+      { userId: collabSelf.id, name: collabSelf.name, isHost: false },
+      {
+        onPeers: setCollabPeers,
+        onFrame: (_userId, dataUrl) => setViewerFrame(dataUrl),
+        onCursor: (userId, name, x, y) => setCollabCursors(prev => ({ ...prev, [userId]: { name, x, y } })),
+        onChat: (userId, name, text, at) => setCollabMessages(prev => [...prev, { userId, name, text, at }]),
+        onEnded: () => {
+          swalToast({ icon: 'info', title: 'The host ended this live session' });
+          onBack();
+        },
+      },
+    );
+    collabHandleRef.current = handle;
+    return () => { handle.leave(); collabHandleRef.current = null; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewOnlySession?.sessionId, collabSelf?.id]);
+
+  const handleGoLive = useCallback(async () => {
+    if (!collabSelf || goingLive) return;
+    setGoingLive(true);
+    try {
+      const teams = await listHostableTeams();
+      if (teams.length === 0) {
+        swalToast({ icon: 'error', title: 'You need to be a team leader (or admin) to go live' });
+        return;
+      }
+      let teamId = teams[0].id;
+      if (teams.length > 1) {
+        const r = await swal({
+          title: 'Go Live',
+          input: 'select',
+          inputOptions: Object.fromEntries(teams.map(t => [t.id, t.name])),
+          inputPlaceholder: 'Choose a team',
+          showCancelButton: true,
+          confirmButtonText: 'Go Live',
+        });
+        if (!r.isConfirmed || !r.value) return;
+        teamId = r.value as string;
+      }
+      const { session, error } = await startStudioSession(teamId, chapterId);
+      if (!session) {
+        swalToast({ icon: 'error', title: error || 'Could not start the live session' });
+        return;
+      }
+      setLiveSession(session);
+      panelLayout.reveal('collab');
+      const handle = joinStudioSessionChannel(
+        session.id,
+        { userId: collabSelf.id, name: collabSelf.name, isHost: true },
+        {
+          onPeers: setCollabPeers,
+          onCursor: (userId, name, x, y) => setCollabCursors(prev => ({ ...prev, [userId]: { name, x, y } })),
+          onChat: (userId, name, text, at) => setCollabMessages(prev => [...prev, { userId, name, text, at }]),
+        },
+      );
+      collabHandleRef.current = handle;
+    } finally {
+      setGoingLive(false);
+    }
+  }, [collabSelf, goingLive, chapterId, panelLayout]);
+
+  const handleEndLive = useCallback(() => {
+    if (!liveSession) return;
+    collabHandleRef.current?.announceEnded();
+    collabHandleRef.current?.leave();
+    collabHandleRef.current = null;
+    void endStudioSession(liveSession.id);
+    setLiveSession(null);
+    setCollabPeers([]);
+    setCollabMessages([]);
+    setCollabCursors({});
+  }, [liveSession]);
+
+  // Best-effort: a host closing the tab/navigating away without clicking "End Live Session"
+  // shouldn't leave a phantom "live" row other users keep seeing as joinable.
+  useEffect(() => {
+    if (!liveSession || viewOnlySession) return;
+    return () => {
+      collabHandleRef.current?.announceEnded();
+      collabHandleRef.current?.leave();
+      void endStudioSession(liveSession.id);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveSession?.id]);
+
   const { foreground, background, setForeground, swap: swapColors, reset: resetColors } = useColor();
   const history = useHistory();
   useKeyboardUndo();
-  const panelLayout = usePanelLayout();
   const [brushSize, setBrushSize] = useState(24);
   const [brushHardness, setBrushHardness] = useState(0.8);
   const [brushOpacity, setBrushOpacity] = useState(1);
@@ -284,6 +411,35 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     onMergeVisible: () => handleMergeVisible(),
   });
   const [activePageId, setActivePageId] = useState<string | null>(pages[0]?.id ?? null);
+
+  // Host broadcast loop: a throttled, downscaled flattened snapshot of the active page — not a
+  // layer/diff replication model (see "Live collaborative Studio" in CLAUDE.md). Viewers never
+  // edit, so there's nothing to gain from shipping the real paint/mask canvas registries and
+  // Konva render pipeline to them.
+  useEffect(() => {
+    if (!isHostingLive) return;
+    let cancelled = false;
+    let inFlight = false;
+    const interval = setInterval(() => {
+      if (inFlight || cancelled) return;
+      const snapshot = canvasRef.current?.getExportSnapshot();
+      if (!snapshot) return;
+      inFlight = true;
+      renderFlattenedPage(snapshot).then((fullCanvas) => {
+        if (cancelled) return;
+        const maxEdge = 1200;
+        const scale = Math.min(1, maxEdge / Math.max(fullCanvas.width, fullCanvas.height));
+        const out = document.createElement('canvas');
+        out.width = Math.max(1, Math.round(fullCanvas.width * scale));
+        out.height = Math.max(1, Math.round(fullCanvas.height * scale));
+        const ctx = out.getContext('2d');
+        if (!ctx) return;
+        ctx.drawImage(fullCanvas, 0, 0, out.width, out.height);
+        collabHandleRef.current?.broadcastFrame(out.toDataURL('image/jpeg', 0.6));
+      }).catch(() => {}).finally(() => { inFlight = false; });
+    }, 500);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [isHostingLive, activePageId]);
   const [pagesManagerOpen, setPagesManagerOpen] = useState(pages.length === 0);
   const [activeTool, setActiveTool] = useState('select');
   const [showCleaned, setShowCleaned] = useState(false);
@@ -1829,9 +1985,20 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     />
   );
 
+  const collabPanel = (
+    <CollabSessionPanel
+      peers={collabPeers}
+      messages={collabMessages}
+      selfUserId={collabSelf?.id ?? ''}
+      onSend={(text) => collabHandleRef.current?.sendChat(text)}
+      hideTitle
+    />
+  );
+
   const allTabs = [
     ...(textPanel ? [{ id: 'text', label: 'Text', content: textPanel }] : []),
     ...(adjustmentPanel ? [{ id: 'adjustment', label: 'Adjustment', content: adjustmentPanel }] : []),
+    ...(liveSession ? [{ id: 'collab', label: 'Live Session', content: collabPanel }] : []),
     { id: 'typer', label: 'TypeR', content: typerPanel },
     { id: 'magicerase', label: 'Magic Erase', content: magicErasePanel },
     { id: 'translation', label: 'Translation', content: translationPanel },
@@ -2066,8 +2233,25 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
       onExitTransformSelection={() => setTransformingSelection(false)}
       quickMaskActive={quickMaskActive}
       activeMaskLayerId={activeMaskLayerId}
+      onLiveCursorMove={isHostingLive ? (p) => { if (p) collabHandleRef.current?.broadcastCursor(p.x, p.y); } : undefined}
     />
   );
+
+  const remoteCollabCursors = Object.entries(collabCursors)
+    .filter(([userId]) => userId !== collabSelf?.id)
+    .map(([userId, c]) => ({ userId, name: c.name, x: c.x, y: c.y }));
+
+  const collabCursorsOverlay = (liveSession && remoteCollabCursors.length > 0) ? (
+    <CollabCursors
+      cursors={remoteCollabCursors}
+      peers={collabPeers}
+      toContainer={(x, y) => {
+        const vt = canvasRef.current?.getViewTransform();
+        if (!vt) return { x, y };
+        return { x: x * vt.scale + vt.pos.x, y: y * vt.scale + vt.pos.y };
+      }}
+    />
+  ) : null;
 
   // Every real panel now stacks vertically in one column (PanelStack), each independently visible/
   // collapsed/reordered/maximized via PanelLayoutContext — replacing the old fixed 3-block layout
@@ -2081,6 +2265,41 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     </div>
   );
 
+  // A read-only spectator mount: a completely separate, self-contained shell rather than the full
+  // edit UI with flags sprinkled through it — the real Konva StudioCanvas (and its paint/mask
+  // canvas registries) never mounts here at all, since a viewer never needs any of that.
+  if (viewOnlySession) {
+    const remoteCursors = Object.entries(collabCursors)
+      .filter(([userId]) => userId !== collabSelf?.id)
+      .map(([userId, c]) => ({ userId, name: c.name, x: c.x, y: c.y }));
+    return (
+      <div className="studio-shell fixed inset-0 lg:relative lg:inset-auto studio-canvas-bg flex flex-col lg:rounded-panel lg:overflow-hidden lg:border lg:border-hairline lg:h-[calc(100vh-8.5rem)] z-30">
+        <div className="liquid-glass-bar flex items-center gap-2 px-3 h-12 shrink-0 border-b border-hairline">
+          <IconButton size="sm" aria-label="Leave live session" title="Leave" onClick={onBack} className="!bg-transparent !border-0 shrink-0">
+            <Home size={16} />
+          </IconButton>
+          <span className="flex items-center gap-1.5 text-ui font-medium text-danger">
+            <Radio size={13} className="animate-pulse" /> Live
+          </span>
+          <span className="text-title font-display font-semibold text-ink truncate max-w-[14rem]">{chapterName}</span>
+        </div>
+        <div className="flex-1 flex min-h-0">
+          <div className="flex-1 min-h-0 min-w-0">
+            <CollabViewerCanvas
+              frameDataUrl={viewerFrame}
+              cursors={remoteCursors}
+              peers={collabPeers}
+              onPointerMove={(x, y) => collabHandleRef.current?.broadcastCursor(x, y)}
+            />
+          </div>
+          <div className="w-72 shrink-0 h-full border-l border-hairline hidden md:block">
+            {collabPanel}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div ref={studioRootRef} className="studio-shell fixed inset-0 lg:relative lg:inset-auto studio-canvas-bg flex flex-col lg:rounded-panel lg:overflow-hidden lg:border lg:border-hairline lg:h-[calc(100vh-8.5rem)] z-30">
       {/* No overflow-x here (there used to be one): per the CSS Overflow spec, 'overflow-x: auto'
@@ -2093,7 +2312,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
           Ten short menu labels fit comfortably down to a 768px-wide viewport without scrolling. */}
       {!panelsHidden && (
         <div className="relative z-40">
-          <MenuBar menus={menus} />
+          <MenuBar menus={menus} compact={layoutMode === 'phone'} />
         </div>
       )}
       <StudioToolbar
@@ -2112,10 +2331,15 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
         workflowStages={workflowStages}
         typeRegionArmed={typeRegionArmed}
         onToggleTypeRegion={() => setTypeRegionArmed(v => !v)}
+        isLive={isHostingLive}
+        goingLive={goingLive}
+        liveViewerCount={Math.max(0, collabPeers.length - 1)}
+        onToggleLive={isHostingLive ? handleEndLive : handleGoLive}
       />
 
       {!panelsHidden && optionsBarVisible && (
         <ToolOptionsBar
+          layoutMode={layoutMode}
           activeTool={activeTool}
           size={brushSize}
           onSizeChange={setBrushSize}
@@ -2163,6 +2387,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
 
         <div className="flex-1 min-h-0 min-w-0 relative">
           {canvasNode}
+          {collabCursorsOverlay}
           {(magicEraseBusy || magicEraseDetecting) && (
             <MagicEraseLoadingOverlay label={magicEraseDetecting ? 'Scanning for text…' : 'Erasing with AI…'} />
           )}

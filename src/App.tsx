@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
   Plus, Trash2, BookOpen, Layers, FileStack, ImagePlus, Sparkles, Boxes, Download, Upload,
-  UploadCloud, FileArchive, X, PackagePlus, Pencil, Search
+  UploadCloud, FileArchive, X, PackagePlus, Pencil, Search, FileText
 } from 'lucide-react';
 import { get, set } from 'idb-keyval';
 import { MangaSeries, Volume, Chapter, Workspace, Page } from './types';
@@ -25,6 +25,7 @@ import { Modal, Button, Input, Textarea, GlassCard, SkeletonCard, AppContextMenu
 import { Studio } from './components/studio/Studio';
 import { StudioBuildTransition } from './components/studio/StudioBuildTransition';
 import { TextEditorPage } from './components/textEditor/TextEditorPage';
+import { getActiveStudioSessionsForChapters, type StudioSessionRow } from './lib/studioCollab';
 import { useAutomationEngine } from './lib/automationEngine';
 import { useCloudClient } from './lib/cloudClient';
 import { migrateWorkspace } from './lib/migrate';
@@ -126,6 +127,14 @@ export default function App() {
   // Bridges "Send to TypeR" from the standalone Text Editor page into whichever chapter's
   // Studio the user next opens — Studio consumes and clears this on mount.
   const [pendingTyperScript, setPendingTyperScript] = useState<string | null>(null);
+  // Carries a chapter's "Open in Text Editor" click into the Text Editor tab — TextEditorPage
+  // consumes and clears this once it resolves/creates that chapter's linked doc.
+  const [pendingTextEditorChapter, setPendingTextEditorChapter] = useState<{ id: string; name: string } | null>(null);
+  // Which chapters currently have a live collab session (see studioCollab.ts) — keyed by
+  // chapter id, refreshed whenever a volume's chapter grid is shown. Clicking a "Live" badge
+  // sets viewOnlySession and opens that chapter's Studio in read-only spectator mode.
+  const [liveSessionsByChapter, setLiveSessionsByChapter] = useState<Record<string, StudioSessionRow>>({});
+  const [viewOnlySession, setViewOnlySession] = useState<{ sessionId: string; teamId: string } | null>(null);
   // Carries a `?join=<token>` invite link into the Teams tab on load, redeemed
   // (as a join request, not an auto-join) then cleared from the URL.
   const [pendingJoinToken, setPendingJoinToken] = useState<string | null>(null);
@@ -222,7 +231,23 @@ export default function App() {
     setActiveMangaId(null);
     setActiveVolumeId(null);
     setActiveChapterId(null);
+    setViewOnlySession(null);
   };
+
+  // Refreshes which of the currently-shown volume's chapters have a live collab session, so the
+  // chapter grid can show a "Live" badge. One batched query per volume view rather than N+1.
+  useEffect(() => {
+    if (!activeVolume || activeVolume.chapters.length === 0) {
+      setLiveSessionsByChapter({});
+      return;
+    }
+    let cancelled = false;
+    getActiveStudioSessionsForChapters(activeVolume.chapters.map(c => c.id)).then((sessions) => {
+      if (cancelled) return;
+      setLiveSessionsByChapter(Object.fromEntries(sessions.map(s => [s.chapter_id, s])));
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [activeVolume?.id, activeVolume?.chapters.length]);
 
   const updateActiveWorkspaceMangas = (updater: (mangas: MangaSeries[]) => MangaSeries[]) => {
     if (!activeWorkspace) return;
@@ -762,7 +787,11 @@ export default function App() {
 
           {activeNavigationTab === 'text-editor' && (
             <div className="fixed inset-0 lg:relative lg:inset-auto flex flex-col bg-[#0b0b0d] lg:rounded-2xl lg:overflow-hidden lg:border lg:border-hairline lg:h-[calc(100vh-8.5rem)] z-30">
-              <TextEditorPage onSendToTyper={(script) => setPendingTyperScript(script)} />
+              <TextEditorPage
+                onSendToTyper={(script) => setPendingTyperScript(script)}
+                pendingChapter={pendingTextEditorChapter}
+                onConsumePendingChapter={() => setPendingTextEditorChapter(null)}
+              />
             </div>
           )}
 
@@ -810,6 +839,7 @@ export default function App() {
                   onConsumePendingTyperScript={() => setPendingTyperScript(null)}
                   onPagesChange={handleChapterPagesChange}
                   onExportMsp={() => handleExportWorkspace(activeWorkspace)}
+                  viewOnlySession={viewOnlySession}
                 />
               )}
 
@@ -831,7 +861,7 @@ export default function App() {
                     {interleaveWithAds(activeVolume.chapters, chap => (
                       <button
                         key={chap.id}
-                        onClick={() => { setPendingChapterId(chap.id); setStudioBuilding(true); }}
+                        onClick={() => { setViewOnlySession(null); setPendingChapterId(chap.id); setStudioBuilding(true); }}
                         className="stagger-item group relative text-left overflow-hidden rounded-2xl"
                       >
                         <GlassCard className="overflow-hidden flex flex-col h-full transition-transform group-hover:-translate-y-0.5">
@@ -847,6 +877,23 @@ export default function App() {
                             <p className="text-[11px] text-ink-faint">{chap.pages.length} page(s)</p>
                           </div>
                         </GlassCard>
+                        {liveSessionsByChapter[chap.id] && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const session = liveSessionsByChapter[chap.id];
+                              setViewOnlySession({ sessionId: session.id, teamId: session.team_id });
+                              setPendingChapterId(chap.id);
+                              setStudioBuilding(true);
+                            }}
+                            className="absolute top-2 left-2 flex items-center gap-1 px-2 py-1 rounded-full bg-danger text-white text-[10px] font-semibold uppercase tracking-wide shadow-lg hover:bg-danger/90"
+                            aria-label="Watch live session"
+                            title="A team member is live in this chapter — click to watch"
+                          >
+                            <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
+                            Live
+                          </button>
+                        )}
                         <div className="absolute top-2 right-2 flex items-center gap-1">
                           <button
                             onClick={(e) => { e.stopPropagation(); openEditChapter(chap); }}
@@ -855,6 +902,14 @@ export default function App() {
                             title="Edit name/cover"
                           >
                             <Pencil size={12} />
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setPendingTextEditorChapter({ id: chap.id, name: chap.name }); setActiveNavigationTab('text-editor'); }}
+                            className="p-1.5 rounded-lg bg-black/40 text-white hover:bg-black/60"
+                            aria-label="Open in Text Editor"
+                            title="Open in Text Editor"
+                          >
+                            <FileText size={12} />
                           </button>
                           <button
                             onClick={(e) => { e.stopPropagation(); handleDownloadChapterZip(chap); }}

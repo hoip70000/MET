@@ -6,7 +6,7 @@ import {
 import { Button, IconButton } from '../ui';
 import { swal, swalToast } from '../../lib/swalTheme';
 import { genId } from '../../lib/id';
-import { loadTextEditorDocs, saveTextEditorDocs, type TextEditorDoc } from '../../lib/textEditorStore';
+import { loadTextEditorDocs, saveTextEditorDocs, findOrCreateChapterDoc, type TextEditorDoc } from '../../lib/textEditorStore';
 import { markMisspellings, stripSpellMarks, findSpellIssues } from '../../lib/spellCheck';
 import { exportDocAsTxt, exportDocAsDocx, printDocAsPdf, downloadBlob } from '../../lib/textEditorExport';
 
@@ -20,9 +20,13 @@ function newDoc(title = 'Untitled'): TextEditorDoc {
 
 interface TextEditorPageProps {
   onSendToTyper: (script: string) => void;
+  /** Set when the user opened this page from a Library chapter's "Open in Text Editor" button. */
+  pendingChapter?: { id: string; name: string } | null;
+  /** Called once the pending chapter has been resolved into a doc, so App.tsx can clear it. */
+  onConsumePendingChapter?: () => void;
 }
 
-export function TextEditorPage({ onSendToTyper }: TextEditorPageProps) {
+export function TextEditorPage({ onSendToTyper, pendingChapter, onConsumePendingChapter }: TextEditorPageProps) {
   const [docs, setDocs] = useState<TextEditorDoc[]>([]);
   const [activeDocId, setActiveDocId] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -35,6 +39,7 @@ export function TextEditorPage({ onSendToTyper }: TextEditorPageProps) {
   const pageRefs = useRef<(HTMLDivElement | null)[]>([]);
   const dirtyRef = useRef(false);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const consumedChapterIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     loadTextEditorDocs().then((saved) => {
@@ -44,6 +49,23 @@ export function TextEditorPage({ onSendToTyper }: TextEditorPageProps) {
       setLoaded(true);
     });
   }, []);
+
+  // Resolve a pending "open from chapter" request once docs are loaded — ref-guarded so a
+  // React 19 strict-mode double-invoke (or an unrelated re-render) can't create a duplicate doc.
+  useEffect(() => {
+    if (!loaded || !pendingChapter) return;
+    if (consumedChapterIdRef.current === pendingChapter.id) return;
+    consumedChapterIdRef.current = pendingChapter.id;
+    const { docs: nextDocs, doc } = findOrCreateChapterDoc(docs, pendingChapter.id, pendingChapter.name);
+    if (nextDocs !== docs) {
+      setDocs(nextDocs);
+      saveTextEditorDocs(nextDocs).catch(console.error);
+    }
+    setActiveDocId(doc.id);
+    setRenderKey((k) => k + 1);
+    onConsumePendingChapter?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded, pendingChapter]);
 
   const activeDoc = docs.find(d => d.id === activeDocId) ?? null;
 

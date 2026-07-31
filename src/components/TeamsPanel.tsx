@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { useChatScroll } from '../hooks/useChatScroll';
 import {
   Users, ImagePlus, Plus, Mail, Check, X, Crown, ShieldCheck, ArrowUpCircle, ArrowDownCircle, UserMinus,
@@ -3567,6 +3567,18 @@ function ChatAvatar({ name, avatar, size = 28 }: { name: string; avatar?: string
   );
 }
 
+/** The blue verified badge next to a chat name: the manual per-member toggle (`is_verified`)
+ *  still works as before, but team admins (the owner, or a site-wide admin profile), sub-admins
+ *  (the 'leader' role), and the system bot are always badged too — they don't need to be
+ *  manually verified one by one. */
+function isChatBadgeVerified(senderId: string | null, team: Team, members: TeamMember[]): boolean {
+  if (senderId === null) return true; // system bot
+  if (senderId === team.owner_id) return true; // team admin
+  const m = members.find(mm => mm.user_id === senderId);
+  if (!m) return false;
+  return !!m.is_verified || m.role === 'leader'; // sub-admin, or manually verified
+}
+
 function hydrateSender(msg: TeamMessage, members: TeamMember[]): TeamMessage {
   if (msg.sender?.name) return msg;
   if (msg.sender_id === null) return { ...msg, sender: { name: 'Team Bot', avatar: '' } };
@@ -3674,7 +3686,7 @@ const TeamMessageBubble = memo(function TeamMessageBubble({ message, replied, is
         >
           <div className={`flex items-center gap-2 ${isMine ? 'flex-row-reverse' : ''}`}>
             <button type="button" onClick={() => m.sender_id && onOpenProfile(m.sender_id)} disabled={isBot} className="text-[10px] font-semibold hover:underline flex items-center gap-1 disabled:cursor-default" style={{ color: isBot ? undefined : nameColor }}>
-              {m.sender?.name || 'Member'} {isVerified && <ShieldCheck size={10} className="text-accent" />}
+              {m.sender?.name || 'Member'} {isVerified && <ShieldCheck size={10} className="text-blue-500" aria-label="Verified" />}
             </button>
             {m.pinned && <span className="text-[9px] text-ink-faint">📌</span>}
             {m.edited_at && !m.deleted && <span className="text-[9px] text-ink-faint">(edited)</span>}
@@ -3827,14 +3839,19 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
 
   const reload = () => { listTeamMessages(team.id, search ? { search } : undefined).then(setMessages); };
 
-  const membersRef = useRef(members);
-  useEffect(() => { membersRef.current = members; }, [members]);
-
   useEffect(() => {
     let mounted = true;
     reload();
     listReactions(team.id, 'team_messages').then(r => { if (mounted) setReactions(r); });
-    const unsubMsgs = subscribeToTeamMessages(team.id, msg => setMessages(prev => upsertById(prev, hydrateSender(msg, membersRef.current))));
+    // Deliberately not hydrated here: a realtime postgres_changes payload never carries the
+    // joined `sender` the initial listTeamMessages() fetch has, so this used to bake in
+    // whatever `members` looked like at the exact moment the message arrived — if that snapshot
+    // was still empty/stale (e.g. right after mount, or for a member who'd just joined and
+    // hadn't propagated into `members` yet), the message was permanently stuck showing "Member"
+    // forever after, even once `members` caught up, since nothing ever re-visited it. Storing the
+    // raw message and hydrating at render time (see `hydratedMessages` below) means the name
+    // self-corrects the moment `members` refreshes, instead of freezing a bad guess.
+    const unsubMsgs = subscribeToTeamMessages(team.id, msg => setMessages(prev => upsertById(prev, msg)));
     const unsubReactions = subscribeToReactions(team.id, () => listReactions(team.id, 'team_messages').then(setReactions));
     typingRef.current = subscribeToTyping(team.id, (userId, name) => {
       if (userId === myUserId) return;
@@ -3892,8 +3909,11 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
     }
   };
 
-  const pinned = messages.filter(m => m.pinned && !m.deleted).slice(0, 3);
-  const messageById = new Map(messages.map(m => [m.id, m]));
+  // Resolved fresh from the current `members` on every render (not baked in once at receipt) —
+  // see the comment at the realtime subscription above for why that matters.
+  const hydratedMessages = useMemo(() => messages.map(m => hydrateSender(m, members)), [messages, members]);
+  const pinned = hydratedMessages.filter(m => m.pinned && !m.deleted).slice(0, 3);
+  const messageById = new Map(hydratedMessages.map(m => [m.id, m]));
   const reactionsByMessageId = new Map<string, MessageReaction[]>();
   for (const r of reactions) {
     const list = reactionsByMessageId.get(r.message_id) ?? [];
@@ -4003,15 +4023,15 @@ function TeamChatThread({ team, members, myMember, canManage, onOpenProfile, cc 
         <Input placeholder="Search messages..." value={search} onChange={e => setSearch(e.target.value)} className="text-xs" />
       </div>
       <div ref={scrollRef} onScroll={handleScroll} data-testid="chat-scroll" className="flex-1 overflow-y-auto p-4 space-y-3 relative">
-        {messages.length === 0 && <p className="text-xs text-ink-faint text-center py-6">No messages yet — say hello.</p>}
-        {messages.map(m => (
+        {hydratedMessages.length === 0 && <p className="text-xs text-ink-faint text-center py-6">No messages yet — say hello.</p>}
+        {hydratedMessages.map(m => (
           <TeamMessageBubble
             key={m.id}
             message={m}
             replied={m.reply_to_id ? messageById.get(m.reply_to_id) ?? null : null}
             isMine={m.sender_id === myUserId}
             canManage={canManage}
-            isVerified={members.find(mm => mm.user_id === m.sender_id)?.is_verified}
+            isVerified={isChatBadgeVerified(m.sender_id, team, members)}
             reactions={reactionsByMessageId.get(m.id) ?? EMPTY_REACTIONS}
             myUserId={myUserId}
             teamId={team.id}

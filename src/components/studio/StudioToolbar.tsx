@@ -1,4 +1,4 @@
-import { Home, Maximize2, Minimize2, PanelLeft, PanelRight, MessageSquareText } from 'lucide-react';
+import { Home, Maximize2, Minimize2, PanelLeft, PanelRight, MessageSquareText, Radio, Users } from 'lucide-react';
 import { IconButton } from '../ui';
 import type { WorkflowStage } from './WorkflowBar';
 
@@ -23,20 +23,26 @@ interface StudioToolbarProps {
    *  panel's own scripted workflow, not a replacement for it. */
   typeRegionArmed: boolean;
   onToggleTypeRegion: () => void;
+  /** Live collab (spectator mode): host-only "Go Live"/"End Live Session" toggle. Undefined when
+   *  going live isn't available for this mount at all (e.g. a read-only viewer session). */
+  isLive?: boolean;
+  goingLive?: boolean;
+  liveViewerCount?: number;
+  onToggleLive?: () => void;
 }
 
 export function StudioToolbar({
   chapterName, showCleaned, onToggleCleaned, overlayOpacity, onOverlayOpacityChange,
   onFit, onBack, onToggleLeftSidebar, onToggleRightSidebar, hasCleaned, isFullscreen, onToggleFullscreen, workflowStages,
-  typeRegionArmed, onToggleTypeRegion,
+  typeRegionArmed, onToggleTypeRegion, isLive, goingLive, liveViewerCount = 0, onToggleLive,
 }: StudioToolbarProps) {
   return (
     <div className="liquid-glass-bar flex items-center gap-2 px-2.5 sm:px-4 h-12 shrink-0 border-b border-hairline">
-      <IconButton size="sm" aria-label="Return home" title="Return home" onClick={onBack} className="!bg-transparent !border-0 shrink-0">
+      <IconButton size="sm" aria-label="Return home" title="Return home" onClick={onBack} className="!bg-transparent !border-0 shrink-0 max-lg:!w-11 max-lg:!h-11">
         <Home size={16} />
       </IconButton>
 
-      <IconButton size="sm" aria-label="Toggle pages panel" title="Pages" onClick={onToggleLeftSidebar} className="!bg-transparent shrink-0">
+      <IconButton size="sm" aria-label="Toggle pages panel" title="Pages" onClick={onToggleLeftSidebar} className="!bg-transparent shrink-0 max-lg:!w-11 max-lg:!h-11">
         <PanelLeft size={15} />
       </IconButton>
 
@@ -77,7 +83,7 @@ export function StudioToolbar({
         aria-label={typeRegionArmed ? 'Disarm Type Region' : 'Arm Type Region — click or draw a selection to type into it'}
         title={typeRegionArmed ? 'Type Region armed — click or draw a selection to type into it' : 'Type Region'}
         onClick={onToggleTypeRegion}
-        className={`shrink-0 ${typeRegionArmed ? '!bg-accent-soft !text-accent' : '!bg-transparent'}`}
+        className={`shrink-0 max-lg:!w-11 max-lg:!h-11 ${typeRegionArmed ? '!bg-accent-soft !text-accent' : '!bg-transparent'}`}
       >
         <MessageSquareText size={15} />
       </IconButton>
@@ -104,7 +110,25 @@ export function StudioToolbar({
       </div>
       <div className="flex-1 lg:hidden" />
 
-      <IconButton size="sm" aria-label="Fit to screen" onClick={onFit} className="!bg-transparent shrink-0">
+      {onToggleLive && (
+        <button
+          type="button"
+          onClick={onToggleLive}
+          disabled={goingLive}
+          className={`shrink-0 flex items-center gap-1.5 h-8 px-2.5 rounded-control border text-ui font-medium transition-colors disabled:opacity-50 ${
+            isLive ? 'bg-danger/15 border-danger/40 text-danger hover:bg-danger/25' : 'bg-ink/5 border-hairline text-ink hover:bg-ink/10'
+          }`}
+          title={isLive ? 'End the live session' : 'Go live — team members can watch and chat'}
+        >
+          <Radio size={13} className={isLive ? 'animate-pulse' : ''} />
+          <span className="hidden sm:inline">{isLive ? 'Live' : goingLive ? 'Starting…' : 'Go Live'}</span>
+          {isLive && liveViewerCount > 0 && (
+            <span className="flex items-center gap-0.5 text-micro"><Users size={11} />{liveViewerCount}</span>
+          )}
+        </button>
+      )}
+
+      <IconButton size="sm" aria-label="Fit to screen" onClick={onFit} className="!bg-transparent shrink-0 max-lg:!w-11 max-lg:!h-11">
         <Maximize2 size={15} />
       </IconButton>
       <IconButton
@@ -112,11 +136,11 @@ export function StudioToolbar({
         aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
         title={isFullscreen ? 'Exit fullscreen (Ctrl/Cmd+Shift+F)' : 'Fullscreen (Ctrl/Cmd+Shift+F)'}
         onClick={onToggleFullscreen}
-        className={`!bg-transparent shrink-0 ${isFullscreen ? '!text-accent' : ''}`}
+        className={`!bg-transparent shrink-0 max-lg:!w-11 max-lg:!h-11 ${isFullscreen ? '!text-accent' : ''}`}
       >
         {isFullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
       </IconButton>
-      <IconButton size="sm" aria-label="Toggle tools panel" title="Tools" onClick={onToggleRightSidebar} className="!bg-transparent shrink-0">
+      <IconButton size="sm" aria-label="Toggle tools panel" title="Tools" onClick={onToggleRightSidebar} className="!bg-transparent shrink-0 max-lg:!w-11 max-lg:!h-11">
         <PanelRight size={15} />
       </IconButton>
     </div>

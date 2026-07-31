@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Sun, Moon, Laptop, Trash2, Info, ShieldCheck, FileText, ImagePlus, Save, LogOut, Download, CloudUpload, Archive, Eraser } from 'lucide-react';
+import { Sun, Moon, Laptop, Trash2, Info, ShieldCheck, FileText, ImagePlus, Save, LogOut, Download, CloudUpload, Archive, Eraser, Users } from 'lucide-react';
 import { clear } from 'idb-keyval';
 import { useTheme, type ThemeMode } from '../contexts/ThemeContext';
 import { GlassCard, Button, Input } from './ui';
@@ -143,6 +143,17 @@ export function SettingsPanel({
     if (result.isConfirmed) await signOut();
   };
 
+  const handleSwitchAccount = async () => {
+    const result = await swal({
+      icon: 'question',
+      title: 'Switch account?',
+      text: 'This signs you out so you can sign back in with a different account.',
+      showCancelButton: true,
+      confirmButtonText: 'Switch Account',
+    });
+    if (result.isConfirmed) await signOut();
+  };
+
   const handleClearData = async () => {
     const result = await swal({
       icon: 'warning',
@@ -180,6 +191,9 @@ export function SettingsPanel({
         <div className="flex flex-col sm:flex-row gap-2">
           <Button onClick={handleSaveProfile} disabled={saving} className="flex-1">
             <Save size={14} /> {saving ? 'Saving...' : 'Save Profile'}
+          </Button>
+          <Button variant="secondary" onClick={handleSwitchAccount} className="flex-1">
+            <Users size={14} /> Switch Account
           </Button>
           <Button variant="secondary" onClick={handleSignOut} className="flex-1">
             <LogOut size={14} /> Sign Out
