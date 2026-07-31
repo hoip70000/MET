@@ -66,34 +66,20 @@ export async function getActiveStudioSessionsForChapters(chapterIds: string[]): 
 }
 
 /** Teams the current user can host a live session under: teams they lead, own, or (being a site
- *  admin) any team at all. Mirrors the same leader-or-admin check the studio_sessions insert RLS
- *  policy enforces server-side — this is only for building the "which team?" picker the Go Live
- *  button shows, not a security boundary itself.
- *
- *  Three sources are merged, not just `listMyMemberships()` alone: a team *owner* has no
- *  guaranteed `team_members` row for their own team (creating a team doesn't insert one), and a
- *  site admin should be able to host under any team, not just ones they happen to belong to —
- *  which requires `teams_select_admin` (migration 0068) to even be visible to them under RLS in
- *  the first place; `is_admin=true` alone doesn't grant that at the database level. */
+ *  admin) are simply an active member of. Mirrors the same leader-or-admin check the
+ *  studio_sessions insert RLS policy enforces server-side — this is only for building the "which
+ *  team?" picker the Go Live button shows, not a security boundary itself. */
 export async function listHostableTeams(): Promise<{ id: string; name: string }[]> {
   const { data: userData } = await supabase.auth.getUser();
   const userId = userData.user?.id;
   if (!userId) return [];
-  const [{ data: profile }, memberships, { data: owned }] = await Promise.all([
+  const [{ data: profile }, memberships] = await Promise.all([
     supabase.from('profiles').select('is_admin').eq('id', userId).maybeSingle(),
     listMyMemberships(),
-    supabase.from('teams').select('id, name').eq('owner_id', userId),
   ]);
   const isAdmin = !!profile?.is_admin;
-  const byId = new Map<string, string>();
-  for (const t of owned ?? []) byId.set(t.id, t.name);
-  for (const m of memberships) {
-    if (m.status === 'active' && m.role === 'leader') byId.set(m.team_id, m.team.name);
-  }
-  if (isAdmin) {
-    const { data: allTeams } = await supabase.from('teams').select('id, name');
-    for (const t of allTeams ?? []) byId.set(t.id, t.name);
-  }
+  const eligible = memberships.filter(m => m.status === 'active' && (isAdmin || m.role === 'leader'));
+  const byId = new Map(eligible.map(m => [m.team_id, m.team.name]));
   return Array.from(byId, ([id, name]) => ({ id, name }));
 }
 
