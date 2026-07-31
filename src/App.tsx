@@ -137,6 +137,11 @@ export default function App() {
   // Set by Teams' "Watch" button on a live session (see LiveSessionsSection in TeamsPanel.tsx) —
   // opens that chapter's Studio in read-only spectator mode instead of the normal edit flow.
   const [viewOnlySession, setViewOnlySession] = useState<{ sessionId: string; teamId: string } | null>(null);
+  // Set alongside viewOnlySession when the session's chapter_id isn't in this device's local
+  // library (a teammate on another device is hosting) — mounts Studio's spectator shell directly,
+  // bypassing the normal activeWorkspace/manga/volume/chapter chain entirely, since none of that
+  // exists locally for this chapter and the viewer doesn't need it anyway.
+  const [remoteViewOnlyChapter, setRemoteViewOnlyChapter] = useState<{ id: string; name: string } | null>(null);
   // Set by Teams' "Go Live" button — Studio starts hosting for this team automatically on mount.
   const [autoStartLiveSession, setAutoStartLiveSession] = useState<{ teamId: string } | null>(null);
   // Carries a `?join=<token>` invite link into the Teams tab on load, redeemed
@@ -278,6 +283,7 @@ export default function App() {
     setActiveChapterId(null);
     setViewOnlySession(null);
     setAutoStartLiveSession(null);
+    setRemoteViewOnlyChapter(null);
   };
 
   /** Finds which workspace/manga/volume a chapter id lives under, for jumping straight to it from
@@ -297,16 +303,25 @@ export default function App() {
   };
 
   const handleWatchLiveSession = (session: StudioSessionRow) => {
+    // Spectating never actually reads this device's local page data — Studio's viewOnly shell
+    // only ever displays the host's broadcast image + cursors + chat — so a chapter missing from
+    // this device's local library (a teammate on another device, watching) is not a blocker.
+    // Resolving it locally is purely a nicety, for a real chapter name and matching breadcrumbs.
     const loc = findChapterLocation(session.chapter_id);
-    if (!loc) {
-      swal({ icon: 'error', title: 'Chapter not found', text: "This session's chapter isn't in your local library on this device." });
-      return;
+    if (loc) {
+      setActiveWorkspaceId(loc.workspaceId);
+      setActiveMangaId(loc.mangaId);
+      setActiveVolumeId(loc.volumeId);
+      setActiveChapterId(session.chapter_id);
+      setRemoteViewOnlyChapter(null);
+    } else {
+      setActiveWorkspaceId(null);
+      setActiveMangaId(null);
+      setActiveVolumeId(null);
+      setActiveChapterId(null);
+      setRemoteViewOnlyChapter({ id: session.chapter_id, name: 'Live Session' });
     }
-    setActiveWorkspaceId(loc.workspaceId);
-    setActiveMangaId(loc.mangaId);
-    setActiveVolumeId(loc.volumeId);
     setViewOnlySession({ sessionId: session.id, teamId: session.team_id });
-    setActiveChapterId(session.chapter_id);
     setActiveNavigationTab('library');
   };
 
@@ -320,6 +335,7 @@ export default function App() {
     setActiveMangaId(loc.mangaId);
     setActiveVolumeId(loc.volumeId);
     setActiveChapterId(chapterId);
+    setRemoteViewOnlyChapter(null);
     setAutoStartLiveSession({ teamId });
     setActiveNavigationTab('library');
   };
@@ -914,6 +930,21 @@ export default function App() {
                 </div>
               )}
 
+              {/* Spectating a live session whose chapter isn't in this device's local library
+                  (a teammate elsewhere is hosting) — Studio's viewOnly shell needs only
+                  chapterId/chapterName for display, never real page data, so this mounts it
+                  directly instead of going through the normal workspace/manga/volume/chapter
+                  chain, which has nothing to offer for a chapter that doesn't exist here. */}
+              {viewOnlySession && remoteViewOnlyChapter && (
+                <Studio
+                  chapterId={remoteViewOnlyChapter.id}
+                  chapterName={remoteViewOnlyChapter.name}
+                  pages={[]}
+                  onBack={resetToLibraryRoot}
+                  viewOnlySession={viewOnlySession}
+                />
+              )}
+
               {/* Chapter view: straight into the Studio, even with zero pages — page upload/pairing
                   now lives inside the Studio itself (StudioPagesPanel's "Add Pages" modal). */}
               {activeWorkspace && activeChapter && activeVolume && activeManga && (
@@ -953,7 +984,7 @@ export default function App() {
                     {interleaveWithAds(activeVolume.chapters, chap => (
                       <button
                         key={chap.id}
-                        onClick={() => { setViewOnlySession(null); setPendingChapterId(chap.id); setStudioBuilding(true); }}
+                        onClick={() => { setViewOnlySession(null); setRemoteViewOnlyChapter(null); setPendingChapterId(chap.id); setStudioBuilding(true); }}
                         className="stagger-item group relative text-left overflow-hidden rounded-2xl"
                       >
                         <GlassCard className="overflow-hidden flex flex-col h-full transition-transform group-hover:-translate-y-0.5">

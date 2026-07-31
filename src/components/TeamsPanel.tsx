@@ -2994,11 +2994,11 @@ function LiveSessionsSection({ team, members, workspaces, onWatchLiveSession, on
               <div className="min-w-0">
                 <p className="text-sm font-semibold text-ink truncate">{host?.profile?.name || host?.invited_email || 'Someone'} is live</p>
                 <p className="text-[11px] text-ink-faint truncate">
-                  {label || `Chapter not on this device (id: ${s.chapter_id.slice(0, 8)}…)`} · started {formatMessageTime(s.started_at)}
+                  {label || 'Live Session'} · started {formatMessageTime(s.started_at)}
                 </p>
               </div>
             </div>
-            <Button size="sm" onClick={() => onWatchLiveSession(s)} disabled={!label} className="shrink-0">
+            <Button size="sm" onClick={() => onWatchLiveSession(s)} className="shrink-0">
               <Eye size={13} /> Watch
             </Button>
           </GlassCard>
