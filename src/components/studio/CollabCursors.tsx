@@ -39,8 +39,17 @@ export function CollabCursors({ cursors, peers, toContainer }: CollabCursorsProp
         const name = nameById.get(c.userId) ?? c.name;
         return (
           <g key={c.userId} transform={`translate(${pos.x} ${pos.y})`}>
-            <path d="M0 0 L0 14 L4 10.5 L6.5 15.5 L8.5 14.5 L6 9.5 L11 9.5 Z" fill={color} stroke="#000" strokeOpacity={0.4} strokeWidth={1} />
-            <g transform="translate(10 16)">
+            {/* Classic macOS/system arrow-pointer silhouette, hotspot at the tip (0,0) — same
+                shape convention Figma/multiplayer cursors use, just colour-coded per participant
+                instead of the OS's flat black, with a white outline so it reads on any art. */}
+            <path
+              d="M0 0 L0 15.5 L3.8 12.1 L6.3 18.5 L8.9 17.4 L6.4 11.2 L11.9 11.2 Z"
+              fill={color}
+              stroke="#fff"
+              strokeWidth={1.2}
+              strokeLinejoin="round"
+            />
+            <g transform="translate(13 17)">
               <rect x={0} y={0} width={Math.max(24, name.length * 6.5 + 10)} height={16} rx={4} fill={color} />
               <text x={5} y={11} fontSize={10} fill="#fff" fontFamily="sans-serif">{name}</text>
             </g>

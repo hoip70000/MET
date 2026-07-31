@@ -236,6 +236,15 @@ export interface StudioCanvasHandle {
    *  to overlay them — mirrors the same `(v - pos) / scale` <-> `v * scale + pos` math this file
    *  already uses internally for its own pointer handling. */
   getViewTransform: () => { pos: { x: number; y: number }; scale: number };
+  /** Live collab remote control: turns a controlling viewer's page-space pointer event into a
+   *  real synthetic PointerEvent dispatched on the Konva stage's own DOM container — the same
+   *  element real mouse/touch/pen input already arrives on, so it flows through the exact same
+   *  `handlePaintPointerDown/Move/Up`/Stage props a genuine local click would, no separate
+   *  "remote input" code path to keep in sync with every tool. Best-effort: synthetic PointerEvents
+   *  driving a canvas library not designed for this can behave subtly differently from a real
+   *  device in edge cases (e.g. drag-and-drop-sensitive browser chrome), which is an accepted
+   *  limit, not something this tries to paper over. */
+  dispatchRemotePointerEvent: (kind: 'down' | 'move' | 'up', pagePos: { x: number; y: number }, button: number) => void;
 }
 
 export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(function StudioCanvas({
@@ -843,6 +852,18 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
     },
     getViewTransform() {
       return { pos, scale };
+    },
+    dispatchRemotePointerEvent(kind, pagePos, button) {
+      const el = stageRef.current?.container();
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const clientX = rect.left + pagePos.x * scale + pos.x;
+      const clientY = rect.top + pagePos.y * scale + pos.y;
+      const type = kind === 'down' ? 'pointerdown' : kind === 'up' ? 'pointerup' : 'pointermove';
+      el.dispatchEvent(new PointerEvent(type, {
+        clientX, clientY, button, buttons: kind === 'up' ? 0 : 1,
+        bubbles: true, cancelable: true, pointerType: 'mouse', isPrimary: true,
+      }));
     },
   }), [onUpdateTextLayer, scale, pos, containerSize, page, selection]);
 

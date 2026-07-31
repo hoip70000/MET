@@ -107,7 +107,10 @@ export interface StudioCollabHandlers {
   onFrame?: (fromUserId: string, dataUrl: string) => void;
   /** Page-space (not screen-space) cursor position from any participant, including the host. */
   onCursor?: (fromUserId: string, name: string, x: number, y: number) => void;
-  onChat?: (fromUserId: string, name: string, text: string, at: number) => void;
+  /** `tts` marks a message the sender wants read aloud on the host's device via SpeechSynthesis —
+   *  only the host side ever acts on it (see Studio.tsx's onChat wiring); a viewer receiving a
+   *  tts-flagged message from someone else just renders it as a normal chat bubble. */
+  onChat?: (fromUserId: string, name: string, text: string, at: number, tts: boolean) => void;
   /** The host closed Studio or lost the connection — viewers should be kicked back to the Library. */
   onEnded?: () => void;
   /** WebRTC mesh voice chat signaling — see useStudioVoiceChat.ts, which is the only consumer of
@@ -117,17 +120,33 @@ export interface StudioCollabHandlers {
   onVoiceOffer?: (fromUserId: string, sdp: RTCSessionDescriptionInit) => void;
   onVoiceAnswer?: (fromUserId: string, sdp: RTCSessionDescriptionInit) => void;
   onVoiceIce?: (fromUserId: string, candidate: RTCIceCandidateInit) => void;
+  /** Remote control — a viewer asking to drive the host's Studio. Host-only: fires when someone
+   *  else requests control. */
+  onControlRequest?: (fromUserId: string, name: string) => void;
+  /** Everyone gets this: who (if anyone) currently holds control, so a viewer's own canvas can
+   *  become interactive and everyone's roster can show who's driving. */
+  onControlGranted?: (userId: string | null) => void;
+  /** Host-only: a pointer event from whoever currently holds control, in page-space (unscaled
+   *  image-pixel coordinates, same convention cursor broadcasting already uses) — see
+   *  StudioCanvasHandle.dispatchRemotePointerEvent, which is what actually turns this into a real
+   *  interaction with the host's own tools. */
+  onRemoteInput?: (fromUserId: string, kind: 'down' | 'move' | 'up', x: number, y: number, button: number) => void;
 }
 
 export interface StudioCollabHandle {
   broadcastFrame: (dataUrl: string) => void;
   broadcastCursor: (x: number, y: number) => void;
-  sendChat: (text: string) => void;
+  sendChat: (text: string, tts?: boolean) => void;
   /** Host-only: tells every viewer the session is over, ahead of/independent from the DB update. */
   announceEnded: () => void;
   sendVoiceOffer: (toUserId: string, sdp: RTCSessionDescriptionInit) => void;
   sendVoiceAnswer: (toUserId: string, sdp: RTCSessionDescriptionInit) => void;
   sendVoiceIce: (toUserId: string, candidate: RTCIceCandidateInit) => void;
+  /** Viewer → host: "let me drive." */
+  requestControl: () => void;
+  /** Host → everyone: grant control to a userId, or pass null to revoke/take it back. */
+  grantControl: (userId: string | null) => void;
+  sendRemoteInput: (kind: 'down' | 'move' | 'up', x: number, y: number, button: number) => void;
   leave: () => void;
 }
 
@@ -136,7 +155,14 @@ export function joinStudioSessionChannel(
   self: { userId: string; name: string; isHost: boolean },
   handlers: StudioCollabHandlers,
 ): StudioCollabHandle {
-  const channel = supabase.channel(channelName(sessionId), { config: { presence: { key: self.userId } } });
+  // broadcast.self:true — without it, a sender never receives their own broadcast events back.
+  // Cursor/frame/voice-signal handlers already filter `payload.userId !== self.userId` (or
+  // toUserId checks) so this changes nothing for them, but chat needs it: there was no local
+  // optimistic-append, so a sent message previously only ever showed up for *other* participants,
+  // never the sender's own window — a real bug, not a design choice.
+  const channel = supabase.channel(channelName(sessionId), {
+    config: { presence: { key: self.userId }, broadcast: { self: true } },
+  });
 
   channel
     .on('presence', { event: 'sync' }, () => {
@@ -156,7 +182,7 @@ export function joinStudioSessionChannel(
       if (payload.userId !== self.userId) handlers.onCursor?.(payload.userId, payload.name, payload.x, payload.y);
     })
     .on('broadcast', { event: 'chat' }, ({ payload }) => {
-      handlers.onChat?.(payload.userId, payload.name, payload.text, payload.at);
+      handlers.onChat?.(payload.userId, payload.name, payload.text, payload.at, !!payload.tts);
     })
     .on('broadcast', { event: 'ended' }, () => {
       handlers.onEnded?.();
@@ -170,6 +196,15 @@ export function joinStudioSessionChannel(
     .on('broadcast', { event: 'voice-ice' }, ({ payload }) => {
       if (payload.toUserId === self.userId) handlers.onVoiceIce?.(payload.fromUserId, payload.candidate);
     })
+    .on('broadcast', { event: 'control-request' }, ({ payload }) => {
+      if (self.isHost && payload.userId !== self.userId) handlers.onControlRequest?.(payload.userId, payload.name);
+    })
+    .on('broadcast', { event: 'control-granted' }, ({ payload }) => {
+      handlers.onControlGranted?.(payload.userId);
+    })
+    .on('broadcast', { event: 'remote-input' }, ({ payload }) => {
+      if (self.isHost && payload.userId !== self.userId) handlers.onRemoteInput?.(payload.userId, payload.kind, payload.x, payload.y, payload.button);
+    })
     .subscribe(async (status) => {
       if (status === 'SUBSCRIBED') {
         await channel.track({ name: self.name, isHost: self.isHost });
@@ -179,11 +214,14 @@ export function joinStudioSessionChannel(
   return {
     broadcastFrame: (dataUrl) => { channel.send({ type: 'broadcast', event: 'frame', payload: { userId: self.userId, dataUrl } }); },
     broadcastCursor: (x, y) => { channel.send({ type: 'broadcast', event: 'cursor', payload: { userId: self.userId, name: self.name, x, y } }); },
-    sendChat: (text) => { channel.send({ type: 'broadcast', event: 'chat', payload: { userId: self.userId, name: self.name, text, at: Date.now() } }); },
+    sendChat: (text, tts) => { channel.send({ type: 'broadcast', event: 'chat', payload: { userId: self.userId, name: self.name, text, at: Date.now(), tts: !!tts } }); },
     announceEnded: () => { channel.send({ type: 'broadcast', event: 'ended', payload: {} }); },
     sendVoiceOffer: (toUserId, sdp) => { channel.send({ type: 'broadcast', event: 'voice-offer', payload: { fromUserId: self.userId, toUserId, sdp } }); },
     sendVoiceAnswer: (toUserId, sdp) => { channel.send({ type: 'broadcast', event: 'voice-answer', payload: { fromUserId: self.userId, toUserId, sdp } }); },
     sendVoiceIce: (toUserId, candidate) => { channel.send({ type: 'broadcast', event: 'voice-ice', payload: { fromUserId: self.userId, toUserId, candidate } }); },
+    requestControl: () => { channel.send({ type: 'broadcast', event: 'control-request', payload: { userId: self.userId, name: self.name } }); },
+    grantControl: (userId) => { channel.send({ type: 'broadcast', event: 'control-granted', payload: { userId } }); },
+    sendRemoteInput: (kind, x, y, button) => { channel.send({ type: 'broadcast', event: 'remote-input', payload: { userId: self.userId, kind, x, y, button } }); },
     leave: () => { supabase.removeChannel(channel); },
   };
 }
