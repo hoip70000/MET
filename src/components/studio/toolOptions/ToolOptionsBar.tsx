@@ -4,6 +4,7 @@ import type { BrushShape } from '../paint/brushTip';
 import { PAINT_TOOLS } from '../paint/usePaintLayer';
 
 interface ToolOptionsBarProps {
+  layoutMode?: 'desktop' | 'tablet' | 'phone';
   activeTool: string;
   size: number;
   onSizeChange: (v: number) => void;
@@ -67,17 +68,26 @@ const SYMMETRY_MODES: { id: SymmetryMode; label: string }[] = [
   { id: 'both', label: 'Both' },
 ];
 
-function Slider({ label, value, min, max, step, onChange, format }: { label: string; value: number; min: number; max: number; step: number; onChange: (v: number) => void; format?: (v: number) => string }) {
+function Slider({ label, value, min, max, step, onChange, format, phone }: { label: string; value: number; min: number; max: number; step: number; onChange: (v: number) => void; format?: (v: number) => string; phone?: boolean }) {
   return (
-    <label className="flex items-center gap-2 text-micro text-ink-faint shrink-0">
+    <label className={`flex items-center gap-2 text-micro text-ink-faint shrink-0 ${phone ? 'min-h-11' : ''}`}>
       <span className="uppercase tracking-wide text-[10px] opacity-70">{label}</span>
-      <input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))} className="studio-focusable w-20 accent-[var(--color-accent)]" />
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className={`studio-focusable accent-[var(--color-accent)] ${phone ? 'w-24 h-6' : 'w-20'}`}
+      />
       <span className="w-8 text-right tabular-nums text-ink font-mono text-[10px]">{format ? format(value) : Math.round(value)}</span>
     </label>
   );
 }
 
 export function ToolOptionsBar({
+  layoutMode = 'desktop',
   activeTool, size, onSizeChange, hardness, onHardnessChange, opacity, onOpacityChange,
   flow, onFlowChange, tolerance, onToleranceChange, liquifyMode, onLiquifyModeChange,
   symmetry, onSymmetryChange, spacing, onSpacingChange, brushShape, onBrushShapeChange,
@@ -86,6 +96,7 @@ export function ToolOptionsBar({
   sliceRectCount, onAddSliceRect, onExportSlices,
   hasSelection, onDeselect,
 }: ToolOptionsBarProps) {
+  const phone = layoutMode === 'phone';
   const tool = findTool(activeTool);
   const showSize = SIZE_TOOLS.has(activeTool);
   const showHardness = HARDNESS_TOOLS.has(activeTool);
@@ -100,17 +111,20 @@ export function ToolOptionsBar({
 
   if (!tool || (!showSize && !showHardness && !showFlow && !showOpacity && !showTolerance && !showLiquifyMode && !showSymmetry && !showSlice && !showDeselect && !showSelectionHint)) return null;
 
+  const controlClass = `studio-interactive studio-focusable bg-ink/5 border border-hairline rounded-control text-ink text-micro shrink-0 ${phone ? 'min-h-11 px-3' : 'px-2 py-1'}`;
+  const selectClass = `bg-ink/5 border border-hairline rounded-control text-ink text-micro ${phone ? 'min-h-11 px-2' : 'px-1.5 py-1'}`;
+
   return (
-    <div className="liquid-glass-bar flex items-center gap-4 px-3 h-10 shrink-0 border-b border-hairline overflow-x-auto">
+    <div className={`liquid-glass-bar flex items-center gap-4 px-3 shrink-0 border-b border-hairline overflow-x-auto ${phone ? 'min-h-14' : 'h-10'}`}>
       <span className="text-ui font-medium text-ink shrink-0 min-w-[5.5rem]">{tool.label}</span>
       <div className="w-px h-4 bg-hairline shrink-0" />
       {showLiquifyMode && (
-        <label className="flex items-center gap-2 text-micro text-ink-faint shrink-0">
+        <label className={`flex items-center gap-2 text-micro text-ink-faint shrink-0 ${phone ? 'min-h-11' : ''}`}>
           <span>Mode</span>
           <select
             value={liquifyMode}
             onChange={(e) => onLiquifyModeChange(e.target.value as LiquifyMode)}
-            className="bg-ink/5 border border-hairline rounded-control px-1.5 py-1 text-ink text-micro"
+            className={selectClass}
           >
             {LIQUIFY_MODES.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
           </select>
@@ -118,7 +132,7 @@ export function ToolOptionsBar({
       )}
       {showDeselect && (
         <button
-          className="studio-interactive studio-focusable bg-ink/5 border border-hairline rounded-control px-2 py-1 text-ink text-micro shrink-0"
+          className={controlClass}
           onClick={onDeselect}
         >
           Deselect
@@ -129,21 +143,21 @@ export function ToolOptionsBar({
           Editing inside selection — Ctrl+D to deselect
         </span>
       )}
-      {showSize && <Slider label="Size" value={size} min={1} max={200} step={1} onChange={onSizeChange} />}
-      {showHardness && <Slider label="Hardness" value={hardness * 100} min={0} max={100} step={1} onChange={(v) => onHardnessChange(v / 100)} format={(v) => `${Math.round(v)}%`} />}
-      {showFlow && <Slider label="Flow" value={flow * 100} min={0} max={100} step={1} onChange={(v) => onFlowChange(v / 100)} format={(v) => `${Math.round(v)}%`} />}
-      {showOpacity && <Slider label="Opacity" value={opacity * 100} min={0} max={100} step={1} onChange={(v) => onOpacityChange(v / 100)} format={(v) => `${Math.round(v)}%`} />}
-      {showTolerance && <Slider label="Tolerance" value={tolerance} min={0} max={100} step={1} onChange={onToleranceChange} />}
+      {showSize && <Slider label="Size" value={size} min={1} max={200} step={1} onChange={onSizeChange} phone={phone} />}
+      {showHardness && <Slider label="Hardness" value={hardness * 100} min={0} max={100} step={1} onChange={(v) => onHardnessChange(v / 100)} format={(v) => `${Math.round(v)}%`} phone={phone} />}
+      {showFlow && <Slider label="Flow" value={flow * 100} min={0} max={100} step={1} onChange={(v) => onFlowChange(v / 100)} format={(v) => `${Math.round(v)}%`} phone={phone} />}
+      {showOpacity && <Slider label="Opacity" value={opacity * 100} min={0} max={100} step={1} onChange={(v) => onOpacityChange(v / 100)} format={(v) => `${Math.round(v)}%`} phone={phone} />}
+      {showTolerance && <Slider label="Tolerance" value={tolerance} min={0} max={100} step={1} onChange={onToleranceChange} phone={phone} />}
       {showSlice && (
         <>
           <button
-            className="studio-interactive studio-focusable bg-ink/5 border border-hairline rounded-control px-2 py-1 text-ink text-micro shrink-0"
+            className={controlClass}
             onClick={onAddSliceRect}
           >
             Add Rect ({sliceRectCount})
           </button>
           <button
-            className="studio-interactive studio-focusable bg-ink/5 border border-hairline rounded-control px-2 py-1 text-ink text-micro shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
+            className={`${controlClass} disabled:opacity-40 disabled:cursor-not-allowed`}
             onClick={onExportSlices}
             disabled={sliceRectCount === 0}
           >
@@ -153,17 +167,17 @@ export function ToolOptionsBar({
       )}
       {showSymmetry && (
         <>
-          <Slider label="Spacing" value={spacing * 100} min={1} max={100} step={1} onChange={(v) => onSpacingChange(v / 100)} format={(v) => `${Math.round(v)}%`} />
-          <Slider label="Smoothing" value={smoothing * 100} min={0} max={100} step={1} onChange={(v) => onSmoothingChange(v / 100)} format={(v) => `${Math.round(v)}%`} />
-          <Slider label="Scatter" value={scatter * 100} min={0} max={100} step={1} onChange={(v) => onScatterChange(v / 100)} format={(v) => `${Math.round(v)}%`} />
-          <Slider label="Angle" value={angle} min={-180} max={180} step={1} onChange={onAngleChange} format={(v) => `${Math.round(v)}°`} />
-          <Slider label="Round" value={roundness * 100} min={5} max={100} step={1} onChange={(v) => onRoundnessChange(v / 100)} format={(v) => `${Math.round(v)}%`} />
-          <label className="flex items-center gap-2 text-micro text-ink-faint shrink-0">
+          <Slider label="Spacing" value={spacing * 100} min={1} max={100} step={1} onChange={(v) => onSpacingChange(v / 100)} format={(v) => `${Math.round(v)}%`} phone={phone} />
+          <Slider label="Smoothing" value={smoothing * 100} min={0} max={100} step={1} onChange={(v) => onSmoothingChange(v / 100)} format={(v) => `${Math.round(v)}%`} phone={phone} />
+          <Slider label="Scatter" value={scatter * 100} min={0} max={100} step={1} onChange={(v) => onScatterChange(v / 100)} format={(v) => `${Math.round(v)}%`} phone={phone} />
+          <Slider label="Angle" value={angle} min={-180} max={180} step={1} onChange={onAngleChange} format={(v) => `${Math.round(v)}°`} phone={phone} />
+          <Slider label="Round" value={roundness * 100} min={5} max={100} step={1} onChange={(v) => onRoundnessChange(v / 100)} format={(v) => `${Math.round(v)}%`} phone={phone} />
+          <label className={`flex items-center gap-2 text-micro text-ink-faint shrink-0 ${phone ? 'min-h-11' : ''}`}>
             <span className="uppercase tracking-wide text-[10px] opacity-70">Tip</span>
             <select
               value={brushShape}
               onChange={(e) => onBrushShapeChange(e.target.value as BrushShape)}
-              className="studio-interactive studio-focusable bg-ink/5 border border-hairline rounded-control px-1.5 py-1 text-ink text-micro"
+              className={`studio-interactive studio-focusable ${selectClass}`}
             >
               {/* 'Image' only appears while an imported tip is active — picking a
                   procedural shape here is how you switch back off it. */}
@@ -171,12 +185,12 @@ export function ToolOptionsBar({
               {BRUSH_SHAPES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
             </select>
           </label>
-          <label className="flex items-center gap-2 text-micro text-ink-faint shrink-0">
+          <label className={`flex items-center gap-2 text-micro text-ink-faint shrink-0 ${phone ? 'min-h-11' : ''}`}>
             <span className="uppercase tracking-wide text-[10px] opacity-70">Symmetry</span>
             <select
               value={symmetry}
               onChange={(e) => onSymmetryChange(e.target.value as SymmetryMode)}
-              className="studio-interactive studio-focusable bg-ink/5 border border-hairline rounded-control px-1.5 py-1 text-ink text-micro"
+              className={`studio-interactive studio-focusable ${selectClass}`}
             >
               {SYMMETRY_MODES.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
             </select>

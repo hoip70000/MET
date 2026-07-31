@@ -46,7 +46,7 @@ export function ToolGroupButton({ group, activeTool, onToolChange, orientation }
     <div className="relative contents">
       <div className="relative">
         <IconButton
-          size="sm"
+          size={orientation === 'horizontal' ? 'lg' : 'sm'}
           active={!!activeInGroup}
           disabled={!shown.enabled}
           aria-label={shown.enabled ? shown.label : `${shown.label} (coming soon)`}

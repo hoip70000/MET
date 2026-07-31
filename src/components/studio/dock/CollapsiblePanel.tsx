@@ -87,7 +87,7 @@ export function CollapsiblePanel({
       onDrop={(e) => { e.preventDefault(); onDropOnHeader(); }}
       onDoubleClick={handleHeaderDoubleClick}
       className={cn(
-        'studio-interactive flex items-center gap-1.5 px-2 h-8 shrink-0 border-b border-hairline/70 select-none',
+        'studio-interactive flex items-center gap-1.5 px-2 h-8 max-lg:h-11 shrink-0 border-b border-hairline/70 select-none',
         draggedOver === 'above' && 'border-t-2 !border-t-accent',
         draggedOver === 'below' && 'border-b-2 !border-b-accent'
       )}
@@ -111,7 +111,7 @@ export function CollapsiblePanel({
           size="sm"
           aria-label={`${title} panel menu`}
           onClick={(e) => { e.stopPropagation(); onMenu(); }}
-          className="!bg-transparent"
+          className="!bg-transparent max-lg:!w-11 max-lg:!h-11"
         >
           <MoreHorizontal size={13} />
         </IconButton>

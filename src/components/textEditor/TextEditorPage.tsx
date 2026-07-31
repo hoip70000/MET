@@ -12,7 +12,7 @@ import { Button, IconButton } from '../ui';
 import { useTheme } from '../../contexts/ThemeContext';
 import { swal, swalToast, Swal } from '../../lib/swalTheme';
 import { genId } from '../../lib/id';
-import { loadTextEditorDocs, saveTextEditorDocs, defaultDocStatus, type TextEditorDoc, type TextEditorDocStatus } from '../../lib/textEditorStore';
+import { loadTextEditorDocs, saveTextEditorDocs, defaultDocStatus, findOrCreateChapterDoc, type TextEditorDoc, type TextEditorDocStatus } from '../../lib/textEditorStore';
 import { stripSpellMarks } from '../../lib/spellCheck';
 import { exportDocAsTxt, exportDocAsDocx, printDocAsPdf, downloadBlob } from '../../lib/textEditorExport';
 import { SplitScreenPreview } from './SplitScreenPreview';
@@ -161,9 +161,13 @@ interface TextEditorPageProps {
    *  split-screen preview's initial page whenever it changes; the preview's own prev/next/page-
    *  number controls can still browse away from it independently afterward. */
   studioActivePageId: string | null;
+  /** Set when the user opened this page from a Library chapter's "Open in Text Editor" button. */
+  pendingChapter?: { id: string; name: string } | null;
+  /** Called once the pending chapter has been resolved into a doc, so App.tsx can clear it. */
+  onConsumePendingChapter?: () => void;
 }
 
-export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, studioActivePageId }: TextEditorPageProps) {
+export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, studioActivePageId, pendingChapter, onConsumePendingChapter }: TextEditorPageProps) {
   const [splitScreenOpen, setSplitScreenOpen] = useState(false);
   // The app-wide theme (same one TopBar/SettingsPanel toggle) — not a second, editor-local theme
   // system. Pages themselves stay bg-white/text-black regardless (see the page div's own
@@ -292,6 +296,25 @@ export function TextEditorPage({ onSendToTyper, workspaces, activeChapterId, stu
     });
     return () => { cancelled = true; };
   }, []);
+
+  // Resolve a pending "open from chapter" request once docs are loaded — ref-guarded so a
+  // React 19 strict-mode double-invoke (or an unrelated re-render) can't create a duplicate doc.
+  const consumedChapterIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!loaded || !pendingChapter) return;
+    if (consumedChapterIdRef.current === pendingChapter.id) return;
+    consumedChapterIdRef.current = pendingChapter.id;
+    const { docs: nextDocs, doc } = findOrCreateChapterDoc(docsRef.current, pendingChapter.id, pendingChapter.name);
+    if (nextDocs !== docsRef.current) {
+      updateDocs(nextDocs);
+      saveTextEditorDocs(nextDocs).catch(console.error);
+    }
+    pageSeedRef.current = doc.pages;
+    setActiveDocId(doc.id);
+    setRenderKey((k) => k + 1);
+    onConsumePendingChapter?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded, pendingChapter]);
 
   // Custom fonts are a page-global FontFace registration (document.fonts), but Studio's own
   // FontsPanel is what normally triggers loading them from storage — a user who opens the text

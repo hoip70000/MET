@@ -1,4 +1,5 @@
 import { get, set } from 'idb-keyval';
+import { genId } from './id';
 
 export interface TextEditorDocStatus {
   inProgress: boolean;
@@ -14,6 +15,8 @@ export interface TextEditorDoc {
   pages: string[];
   updatedAt: number;
   status: TextEditorDocStatus;
+  /** Links this doc to a Library chapter, so opening it from that chapter reopens the same doc. Optional: pre-existing docs have none. */
+  chapterId?: string;
 }
 
 const STORAGE_KEY = 'text_editor_docs';
@@ -42,6 +45,7 @@ function migrateDoc(raw: unknown): TextEditorDoc {
     pages: doc.pages,
     updatedAt: doc.updatedAt ?? Date.now(),
     status: doc.status ?? defaultDocStatus(),
+    chapterId: doc.chapterId,
   };
 }
 
@@ -57,4 +61,24 @@ export async function loadTextEditorDocs(): Promise<TextEditorDoc[] | null> {
 export async function saveTextEditorDocs(docs: TextEditorDoc[]): Promise<void> {
   const stored: StoredWrapper = { v: SCHEMA_VERSION, docs };
   await set(STORAGE_KEY, stored);
+}
+
+/** Returns the doc already linked to `chapterId`, or appends a new one for it. */
+export function findOrCreateChapterDoc(
+  docs: TextEditorDoc[],
+  chapterId: string,
+  defaultTitle: string,
+): { docs: TextEditorDoc[]; doc: TextEditorDoc } {
+  const existing = docs.find((d) => d.chapterId === chapterId);
+  if (existing) return { docs, doc: existing };
+  const doc: TextEditorDoc = {
+    id: genId('tedoc'),
+    title: defaultTitle,
+    dir: 'ltr',
+    pages: [''],
+    updatedAt: Date.now(),
+    status: defaultDocStatus(),
+    chapterId,
+  };
+  return { docs: [...docs, doc], doc };
 }

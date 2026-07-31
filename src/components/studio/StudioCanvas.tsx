@@ -147,6 +147,10 @@ interface StudioCanvasProps {
   /** The layer whose *mask* (not its own content) is the current paint target, or null when
    *  painting normally. Set by clicking a mask's thumbnail in the Layers panel. */
   activeMaskLayerId?: string | null;
+  /** Live collab: the pointer's page-image-space position on every move (null on leave), for
+   *  broadcasting this user's cursor to other participants of a hosted session. Independent of
+   *  SVG_OVERLAY_TOOLS — fires for any tool, unlike the brush outline's own tracking. */
+  onLiveCursorMove?: (pagePos: { x: number; y: number } | null) => void;
 }
 
 export interface StudioCanvasHandle {
@@ -227,6 +231,11 @@ export interface StudioCanvasHandle {
    * Photoshop's "Add Layer Mask" behavior of masking to the current selection when one exists.
    */
   createMask: (maskId: string) => void;
+  /** Live collab: the current stage pan/zoom, so a caller outside this component (Studio.tsx) can
+   *  convert other participants' page-space cursor broadcasts into this view's own container-space
+   *  to overlay them — mirrors the same `(v - pos) / scale` <-> `v * scale + pos` math this file
+   *  already uses internally for its own pointer handling. */
+  getViewTransform: () => { pos: { x: number; y: number }; scale: number };
 }
 
 export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(function StudioCanvas({
@@ -235,7 +244,7 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
   onTextLineSelectionChange, fontFamilies = [],
   paintSettings, selection, onSelectionChange, typeRegionArmed = false, onCreateTypeRegion, onPaintStrokeEnd, onEyedropperPick, onCommitCrop,
   queuedBubbleRects, queuedSliceRects, transformingSelection = false, onExitTransformSelection, quickMaskActive = false,
-  activeMaskLayerId = null,
+  activeMaskLayerId = null, onLiveCursorMove,
 }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<Konva.Stage>(null);
@@ -831,6 +840,9 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
         ctx.fillRect(0, 0, canvas.width, canvas.height);
       }
       maskCanvasRegistry.current[maskId] = canvas;
+    },
+    getViewTransform() {
+      return { pos, scale };
     },
   }), [onUpdateTextLayer, scale, pos, containerSize, page, selection]);
 
@@ -2115,12 +2127,18 @@ export const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(fu
       ref={containerRef}
       className={`studio-canvas-bg relative w-full h-full overflow-hidden touch-none ${cursorClass}`}
       onPointerMove={(e) => {
-        if (!SVG_OVERLAY_TOOLS.has(activeTool)) return;
+        // Live-collab cursor broadcasting needs a position for any tool, not just the
+        // brush-cursor-chrome ones below — so this rect/cx/cy computation itself can't be
+        // gated behind SVG_OVERLAY_TOOLS the way the rest of this handler still is.
         const rect = containerRef.current?.getBoundingClientRect();
         if (!rect) return;
-        setBrushCursorPos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+        const cx = e.clientX - rect.left;
+        const cy = e.clientY - rect.top;
+        onLiveCursorMove?.({ x: (cx - pos.x) / scale, y: (cy - pos.y) / scale });
+        if (!SVG_OVERLAY_TOOLS.has(activeTool)) return;
+        setBrushCursorPos({ x: cx, y: cy });
       }}
-      onPointerLeave={() => { setBrushCursorPos(null); setEyedropperColor(null); }}
+      onPointerLeave={() => { setBrushCursorPos(null); setEyedropperColor(null); onLiveCursorMove?.(null); }}
     >
       {containerSize.width > 0 && (
         <Stage
