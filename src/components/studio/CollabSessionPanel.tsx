@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Send, Crown, Mic, MicOff, PhoneOff } from 'lucide-react';
+import { Send, Crown, Mic, MicOff, PhoneOff, Volume2, MousePointer2, MousePointerClick } from 'lucide-react';
 import { StudioPanel } from './StudioPanel';
 import type { StudioCollabPeer } from '../../lib/studioCollab';
 
@@ -14,7 +14,9 @@ interface CollabSessionPanelProps {
   peers: StudioCollabPeer[];
   messages: CollabChatMessage[];
   selfUserId: string;
-  onSend: (text: string) => void;
+  /** `tts` asks the host's device specifically to read this message aloud — see Studio.tsx's
+   *  onChat wiring, the only place that actually speaks it. */
+  onSend: (text: string, tts: boolean) => void;
   /** Participants (by userId) whose mic volume is currently above the speaking threshold — pulses
    *  their roster avatar. Includes the local user when they're the one talking. */
   speakingUserIds: Set<string>;
@@ -22,6 +24,12 @@ interface CollabSessionPanelProps {
   voiceMuted: boolean;
   onToggleVoiceJoined: () => void;
   onToggleVoiceMuted: () => void;
+  /** Remote control (StudioCanvasHandle.dispatchRemotePointerEvent). `isHost` is this mount's own
+   *  role — a host sees a "take back control" affordance instead of "request control". */
+  isHost: boolean;
+  controlGrantedTo: string | null;
+  onRequestControl: () => void;
+  onRevokeControl: () => void;
   hideTitle?: boolean;
 }
 
@@ -43,23 +51,28 @@ function PeerAvatar({ name, speaking }: { name: string; speaking: boolean }) {
 }
 
 /**
- * Roster + chat + mic voice chat for a live collaborative Studio session. Chat is broadcast-only/
- * ephemeral (no table, mirrors chat.ts's typing-indicator broadcast) — it exists for participants
- * watching live, not as a record to read back later, so `messages` is whatever this mount has
- * seen since it joined the channel. Voice is a separate opt-in (useStudioVoiceChat.ts's WebRTC
- * mesh) — joining the session never requests mic access on its own.
+ * Roster + chat + mic voice chat + remote control for a live collaborative Studio session. Chat
+ * is broadcast-only/ephemeral (no table, mirrors chat.ts's typing-indicator broadcast) — it exists
+ * for participants watching live, not as a record to read back later, so `messages` is whatever
+ * this mount has seen since it joined the channel. Voice is a separate opt-in
+ * (useStudioVoiceChat.ts's WebRTC mesh) — joining the session never requests mic access on its own.
  */
 export function CollabSessionPanel({
-  peers, messages, selfUserId, onSend, speakingUserIds, voiceJoined, voiceMuted, onToggleVoiceJoined, onToggleVoiceMuted, hideTitle,
+  peers, messages, selfUserId, onSend, speakingUserIds, voiceJoined, voiceMuted, onToggleVoiceJoined, onToggleVoiceMuted,
+  isHost, controlGrantedTo, onRequestControl, onRevokeControl, hideTitle,
 }: CollabSessionPanelProps) {
   const [draft, setDraft] = useState('');
+  const [ttsOnSend, setTtsOnSend] = useState(false);
 
   function submit() {
     const text = draft.trim();
     if (!text) return;
-    onSend(text);
+    onSend(text, ttsOnSend);
     setDraft('');
   }
+
+  const iHaveControl = controlGrantedTo === selfUserId;
+  const controllerName = controlGrantedTo ? peers.find(p => p.userId === controlGrantedTo)?.name ?? 'Someone' : null;
 
   return (
     <StudioPanel title="Live Session" hideTitle={hideTitle} bare>
@@ -74,12 +87,13 @@ export function CollabSessionPanel({
             >
               <PeerAvatar name={p.name} speaking={speakingUserIds.has(p.userId)} />
               {p.isHost && <Crown size={10} className="text-accent" />}
+              {p.userId === controlGrantedTo && <MousePointerClick size={10} className="text-success" />}
               {p.name}
             </span>
           ))}
         </div>
 
-        <div className="flex items-center gap-2 px-3 py-2 border-b border-hairline/70 shrink-0">
+        <div className="flex items-center gap-2 px-3 py-2 border-b border-hairline/70 shrink-0 flex-wrap">
           <button
             type="button"
             onClick={onToggleVoiceJoined}
@@ -101,6 +115,34 @@ export function CollabSessionPanel({
               {voiceMuted ? <MicOff size={13} /> : <Mic size={13} />}
             </button>
           )}
+
+          {/* Remote control: a viewer asks, the host approves/denies via a confirm prompt
+              (Studio.tsx's onControlRequest) — this button only ever sends the request. */}
+          {!isHost && !iHaveControl && (
+            <button
+              type="button"
+              onClick={onRequestControl}
+              disabled={!!controlGrantedTo}
+              className="flex items-center gap-1.5 h-7 px-2.5 rounded-control text-micro font-medium bg-ink/5 text-ink hover:bg-ink/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              title={controlGrantedTo ? `${controllerName} is currently in control` : 'Ask the host for control'}
+            >
+              <MousePointer2 size={12} /> Request Control
+            </button>
+          )}
+          {!isHost && iHaveControl && (
+            <span className="flex items-center gap-1.5 h-7 px-2.5 rounded-control text-micro font-medium bg-success/15 text-success">
+              <MousePointer2 size={12} /> You're in control
+            </span>
+          )}
+          {isHost && controlGrantedTo && (
+            <button
+              type="button"
+              onClick={onRevokeControl}
+              className="flex items-center gap-1.5 h-7 px-2.5 rounded-control text-micro font-medium bg-danger/15 text-danger hover:bg-danger/25 transition-colors"
+            >
+              <MousePointer2 size={12} /> Take back control ({controllerName})
+            </button>
+          )}
         </div>
 
         <div className="flex-1 min-h-0 overflow-y-auto px-3 py-2 flex flex-col gap-1.5">
@@ -116,6 +158,11 @@ export function CollabSessionPanel({
             </div>
           ))}
         </div>
+
+        <label className="flex items-center gap-1.5 px-3 pt-1 shrink-0 text-micro text-ink-faint">
+          <input type="checkbox" checked={ttsOnSend} onChange={(e) => setTtsOnSend(e.target.checked)} />
+          <Volume2 size={11} /> Read aloud on host's device
+        </label>
 
         <div className="flex items-center gap-1.5 p-2 border-t border-hairline/70 shrink-0">
           <input

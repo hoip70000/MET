@@ -131,6 +131,16 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
   const [goingLive, setGoingLive] = useState(false);
   const collabHandleRef = useRef<StudioCollabHandle | null>(null);
   const isHostingLive = !!liveSession && !viewOnlySession;
+  // Remote control: who currently holds it (everyone learns this, so a granted viewer's own
+  // canvas can become interactive and the roster can show who's driving), tracked identically on
+  // host and viewers — only the host's onControlRequest handler ever actually grants it, gated at
+  // the channel layer (studioCollab.ts only invokes that callback for self.isHost in the first
+  // place, so there's no separate "am I host" check needed here).
+  const [controlGrantedTo, setControlGrantedTo] = useState<string | null>(null);
+  // Same stale-closure fix as voiceRef above — the host's onRemoteInput handler is captured once
+  // when the channel is created and never re-subscribed just because `controlGrantedTo` changed.
+  const controlGrantedToRef = useRef(controlGrantedTo);
+  useEffect(() => { controlGrantedToRef.current = controlGrantedTo; }, [controlGrantedTo]);
   const voice = useStudioVoiceChat({
     collabHandleRef,
     selfUserId: collabSelf?.id ?? null,
@@ -173,6 +183,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
         onVoiceOffer: (from, sdp) => voiceRef.current.handleOffer(from, sdp),
         onVoiceAnswer: (from, sdp) => voiceRef.current.handleAnswer(from, sdp),
         onVoiceIce: (from, candidate) => voiceRef.current.handleIce(from, candidate),
+        onControlGranted: setControlGrantedTo,
       },
     );
     collabHandleRef.current = handle;
@@ -201,10 +212,35 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
         {
           onPeers: setCollabPeers,
           onCursor: (userId, name, x, y) => setCollabCursors(prev => ({ ...prev, [userId]: { name, x, y } })),
-          onChat: (userId, name, text, at) => setCollabMessages(prev => [...prev, { userId, name, text, at }]),
+          onChat: (userId, name, text, at, tts) => {
+            setCollabMessages(prev => [...prev, { userId, name, text, at }]);
+            // Only the host ever speaks a tts-flagged message — reading it aloud on every
+            // viewer's device too would be a nonsensical, noisy default for what's meant to be a
+            // "make sure the host specifically hears this" gesture (e.g. a viewer flagging
+            // something urgent while the host is heads-down painting and not watching chat).
+            if (tts && typeof window !== 'undefined' && 'speechSynthesis' in window) {
+              window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+            }
+          },
           onVoiceOffer: (from, sdp) => voiceRef.current.handleOffer(from, sdp),
           onVoiceAnswer: (from, sdp) => voiceRef.current.handleAnswer(from, sdp),
           onVoiceIce: (from, candidate) => voiceRef.current.handleIce(from, candidate),
+          onControlRequest: async (userId, name) => {
+            const r = await swal({
+              icon: 'question',
+              title: 'Control request',
+              text: `${name} wants to drive your Studio (paint/use tools remotely). Allow?`,
+              showCancelButton: true,
+              confirmButtonText: 'Allow',
+              cancelButtonText: 'Deny',
+            });
+            if (r.isConfirmed) collabHandleRef.current?.grantControl(userId);
+          },
+          onControlGranted: setControlGrantedTo,
+          onRemoteInput: (fromUserId, kind, x, y, button) => {
+            if (fromUserId !== controlGrantedToRef.current) return; // stale/unauthorized — ignore
+            canvasRef.current?.dispatchRemotePointerEvent(kind, { x, y }, button);
+          },
         },
       );
       collabHandleRef.current = handle;
@@ -247,6 +283,37 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveSession?.id]);
+
+  // The host can't just wander off mid-session — leaving requires an explicit "yes, stop the
+  // session" confirmation, not just clicking Back/Home. The unmount-cleanup effect above still
+  // exists as a safety net for a crashed tab/lost connection, but a deliberate exit is gated.
+  const handleBackClick = useCallback(async () => {
+    if (!isHostingLive) { onBack(); return; }
+    const r = await swal({
+      icon: 'warning',
+      title: "You're live",
+      text: 'Leaving now ends the session for everyone watching. Stop the session and leave?',
+      showCancelButton: true,
+      confirmButtonText: 'Stop & Leave',
+      cancelButtonText: 'Stay',
+    });
+    if (!r.isConfirmed) return;
+    handleEndLive();
+    onBack();
+  }, [isHostingLive, onBack, handleEndLive]);
+
+  // Same guard for closing/refreshing the tab outright — the browser's own native "leave site?"
+  // prompt is the only thing that can interrupt that, and only if the handler calls
+  // preventDefault() synchronously (an async confirm dialog of our own can't run in time here).
+  useEffect(() => {
+    if (!isHostingLive) return;
+    function onBeforeUnload(e: BeforeUnloadEvent) {
+      e.preventDefault();
+      e.returnValue = '';
+    }
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [isHostingLive]);
 
   const { foreground, background, setForeground, swap: swapColors, reset: resetColors } = useColor();
   const history = useHistory();
@@ -2158,12 +2225,16 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
       peers={collabPeers}
       messages={collabMessages}
       selfUserId={collabSelf?.id ?? ''}
-      onSend={(text) => collabHandleRef.current?.sendChat(text)}
+      onSend={(text, tts) => collabHandleRef.current?.sendChat(text, tts)}
       speakingUserIds={voice.speakingUserIds}
       voiceJoined={voice.joined}
       voiceMuted={voice.muted}
       onToggleVoiceJoined={voice.toggleJoined}
       onToggleVoiceMuted={voice.toggleMuted}
+      isHost={isHostingLive}
+      controlGrantedTo={controlGrantedTo}
+      onRequestControl={() => collabHandleRef.current?.requestControl()}
+      onRevokeControl={() => collabHandleRef.current?.grantControl(null)}
       hideTitle
     />
   );
@@ -2210,7 +2281,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
   const pagesTabHorizontal = <StudioPagesPanel pages={pages} activePageId={activePageId} onSelect={setActivePageId} orientation="horizontal" onManagePages={() => setPagesManagerOpen(true)} />;
 
   const menus = buildMenus({
-    onBack: onBack,
+    onBack: handleBackClick,
     onExport: () => setExportOpen(true),
     onExportSlices: handleExportSlices,
     hasSliceRects: sliceRects.length > 0,
@@ -2467,7 +2538,16 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
               frameDataUrl={viewerFrame}
               cursors={remoteCursors}
               peers={collabPeers}
-              onPointerMove={(x, y) => collabHandleRef.current?.broadcastCursor(x, y)}
+              onPointerMove={(x, y) => {
+                collabHandleRef.current?.broadcastCursor(x, y);
+                // Also relayed as remote input while in control, not just down/up — a paint
+                // stroke is a drag, and the host's tools need every point along it, not just the
+                // two endpoints.
+                if (controlGrantedTo === collabSelf?.id) collabHandleRef.current?.sendRemoteInput('move', x, y, 0);
+              }}
+              hasControl={controlGrantedTo === collabSelf?.id}
+              onPointerDown={(x, y, button) => collabHandleRef.current?.sendRemoteInput('down', x, y, button)}
+              onPointerUp={(x, y, button) => collabHandleRef.current?.sendRemoteInput('up', x, y, button)}
             />
           </div>
           <div className="w-72 shrink-0 h-full border-l border-hairline hidden md:block">
@@ -2500,7 +2580,7 @@ function StudioInner({ chapterId, chapterName, pages, onBack, pendingTyperScript
         overlayOpacity={overlayOpacity}
         onOverlayOpacityChange={setOverlayOpacity}
         onFit={() => setFitSignal(s => s + 1)}
-        onBack={onBack}
+        onBack={handleBackClick}
         onToggleLeftSidebar={toggleLeftSidebar}
         onToggleRightSidebar={toggleRightSidebar}
         hasCleaned={!!activePage?.cleaned}
